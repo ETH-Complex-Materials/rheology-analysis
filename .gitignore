@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.venv
+venv/
+env/
+
+# Virtual environments (one level up)
+../rheology-env*/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+*.code-workspace
+
+# Data files — do not commit raw experimental data
+*.xlsx
+*.xls
+*.csv

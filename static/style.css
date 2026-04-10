@@ -1,0 +1,251 @@
+/* ===== App Shell ===== */
+body {
+  background: #f8f9fa;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+}
+
+.app-header {
+  background: #fff;
+  border-bottom: 2px solid #dee2e6;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+/* ===== Drop Zone ===== */
+.drop-zone {
+  border: 2px dashed #adb5bd;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  background: #f8f9fa;
+  min-height: 100px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.drop-zone:hover,
+.drop-zone.dragover {
+  border-color: #0d6efd;
+  background: #e9f0ff;
+}
+
+.drop-zone.loaded {
+  border-color: #198754;
+  background: #f0fff4;
+}
+
+/* ===== Sheet list checkboxes ===== */
+.sheet-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid #dee2e6;
+  border-radius: 0.375rem;
+  padding: 0.4rem;
+}
+
+.sheet-item-group { margin-bottom: 2px; }
+
+.sheet-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.3rem;
+  border-radius: 0.25rem;
+  transition: background 0.15s;
+}
+
+.sheet-item:hover { background: #f0f4ff; }
+
+.sheet-badge {
+  font-size: 0.7rem;
+  padding: 0.1em 0.4em;
+}
+
+/* Per-sheet type selector */
+.sheet-type-select {
+  font-size: 0.68rem;
+  border: 1px solid #ced4da;
+  border-radius: 0.2rem;
+  padding: 0.05rem 0.2rem;
+  background: #fff;
+  color: #495057;
+  max-width: 110px;
+}
+
+/* Expand button */
+.btn-expand {
+  background: none;
+  border: none;
+  padding: 0 0.2rem;
+  color: #6c757d;
+  cursor: pointer;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+.btn-expand:hover { color: #0d6efd; }
+
+/* ===== Material group (top-level hierarchy) ===== */
+.material-group { margin-bottom: 4px; }
+.material-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.3rem;
+  border-radius: 0.25rem;
+  background: #e9ecef;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #343a40;
+}
+.material-header:hover { background: #dee2e6; }
+.material-sheets {
+  padding-left: 1rem;
+  border-left: 3px solid #0d6efd33;
+  margin: 2px 0 4px 0.5rem;
+}
+
+/* Interval sub-rows */
+.interval-list {
+  padding-left: 1.4rem;
+  border-left: 2px solid #e9ecef;
+  margin: 2px 0 4px 0.6rem;
+}
+
+.interval-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.25rem;
+  font-size: 0.75rem;
+  border-radius: 0.2rem;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.interval-item:hover { background: #f5f8ff; }
+.interval-item input { margin: 0; flex-shrink: 0; }
+
+/* ===== Sidebar cards ===== */
+#sidebar .card-header {
+  background: #f1f3f5;
+  font-size: 0.85rem;
+}
+
+/* ===== Plot area ===== */
+.plot-container {
+  background: #fff;
+  border-radius: 0.5rem;
+  border: 1px solid #dee2e6;
+  padding: 0.5rem;
+  min-height: 560px;
+}
+
+/* ===== Description accordion ===== */
+.desc-toggle { font-size: 0.85rem; background: #f8f9fa; }
+.desc-toggle:not(.collapsed) { background: #e9f0ff; }
+#desc-content {
+  font-size: 0.88rem;
+  line-height: 1.7;
+}
+#desc-content p { margin-bottom: 0.5rem; }
+#desc-content ul { padding-left: 1.4rem; margin-bottom: 0.5rem; }
+
+/* ===== Nav tabs ===== */
+.nav-tabs .nav-link {
+  font-size: 0.85rem;
+  color: #495057;
+}
+
+.nav-tabs .nav-link.active {
+  font-weight: 600;
+}
+
+/* ===== Parameter controls ===== */
+.param-group label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #495057;
+  margin-bottom: 0.2rem;
+}
+
+.param-group .form-control,
+.param-group .form-check-label {
+  font-size: 0.82rem;
+}
+
+/* ===== Data Preview ===== */
+.preview-scroll {
+  max-height: 380px;
+  overflow-y: auto;
+  border-radius: 0.375rem;
+  border: 1px solid #dee2e6;
+}
+
+.preview-table {
+  font-size: 0.78rem;
+  margin-bottom: 0;
+}
+
+.preview-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #212529;
+  color: #fff;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 0.35rem 0.5rem;
+}
+
+.preview-table td {
+  white-space: nowrap;
+  padding: 0.25rem 0.5rem;
+}
+
+/* ===== Responsive plot height ===== */
+@media (max-width: 768px) {
+  .plot-container { min-height: 380px; }
+}
+
+/* ===== noUiSlider custom theme ===== */
+.seg-slider-wrap { margin-top: 0.5rem; }
+.seg-slider-wrap .seg-slider-label {
+  font-size: 0.75rem;
+  color: #6c757d;
+  font-weight: 600;
+}
+.seg-slider-wrap .seg-slider-val {
+  font-size: 0.72rem;
+  color: #495057;
+}
+.noUi-target {
+  background: #e9ecef;
+  border: none;
+  box-shadow: none;
+  height: 6px;
+  border-radius: 3px;
+}
+.noUi-connect { background: #0d6efd; }
+.noUi-handle {
+  border: 2px solid #0d6efd;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+  width: 16px !important;
+  height: 16px !important;
+  right: -8px !important;
+  top: -5px !important;
+  cursor: grab;
+}
+.noUi-handle:focus { outline: none; }
+.noUi-handle::before, .noUi-handle::after { display: none; }
+.noUi-tooltip {
+  font-size: 0.68rem;
+  padding: 2px 5px;
+  background: #343a40;
+  color: #fff;
+  border: none;
+  border-radius: 3px;
+}

@@ -1,0 +1,8 @@
+services:
+  rheology-webapp:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"   # bind to localhost only — Apache reverse proxy handles external access
+    environment:
+      - PYTHONUNBUFFERED=1
