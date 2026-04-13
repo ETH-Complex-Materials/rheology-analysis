@@ -535,36 +535,67 @@ def evaluate_recovery_components(analysis_results: list[dict], t_release: float 
     return components
 
 
-def build_recovery_component_figures(components: list[dict]) -> tuple[dict, dict]:
-    """Bar chart + table for recovery components."""
+def build_recovery_component_figures(components: list[dict]) -> dict:
+    """Combined bar chart + summary table for recovery components (single figure)."""
+    from plotly.subplots import make_subplots
+
     if not components:
         empty = go.Figure()
         empty.add_annotation(
             text="No recovery data found.<br>Select both segments (creep + recovery) in the<br>Sheet Selection panel to enable this analysis.",
             xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
             font=dict(size=14), align="center")
-        return empty.to_dict(), empty.to_dict()
+        return empty.to_dict()
 
     df = pd.DataFrame(components)
     means = df[['frac_elastic','frac_visco','frac_plastic']].mean()
+    stds  = df[['frac_elastic','frac_visco','frac_plastic']].std(ddof=0).fillna(0)
 
-    avg_row = pd.DataFrame([{'Sample':'Mean', **means}])
+    avg_row = pd.DataFrame([{'Sample': 'Mean', **means}])
     df_plot = pd.concat([df, avg_row], ignore_index=True)
 
-    bar = go.Figure()
-    bar.add_trace(go.Bar(x=df_plot['Sample'], y=df_plot['frac_elastic'],
+    n_rows = len(components)
+    tbl_height = max(0.28, min(0.40, 0.12 + n_rows * 0.06))
+    bar_height = 1.0 - tbl_height
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        specs=[[{"type": "bar"}], [{"type": "table"}]],
+        row_heights=[bar_height, tbl_height],
+        vertical_spacing=0.14,
+    )
+
+    fig.add_trace(go.Bar(x=df_plot['Sample'], y=df_plot['frac_elastic'],
                          name='Elastic', marker_color='#2196F3',
                          text=[f"{v:.1f}%" for v in df_plot['frac_elastic']],
-                         textposition='inside', insidetextanchor='middle'))
-    bar.add_trace(go.Bar(x=df_plot['Sample'], y=df_plot['frac_visco'],
+                         textposition='inside', insidetextanchor='middle'), row=1, col=1)
+    fig.add_trace(go.Bar(x=df_plot['Sample'], y=df_plot['frac_visco'],
                          name='Viscoelastic', marker_color='#FF9800',
                          text=[f"{v:.1f}%" for v in df_plot['frac_visco']],
-                         textposition='inside', insidetextanchor='middle'))
-    bar.add_trace(go.Bar(x=df_plot['Sample'], y=df_plot['frac_plastic'],
+                         textposition='inside', insidetextanchor='middle'), row=1, col=1)
+    fig.add_trace(go.Bar(x=df_plot['Sample'], y=df_plot['frac_plastic'],
                          name='Plastic', marker_color='#4CAF50',
                          text=[f"{v:.1f}%" for v in df_plot['frac_plastic']],
-                         textposition='inside', insidetextanchor='middle'))
-    bar.update_layout(
+                         textposition='inside', insidetextanchor='middle'), row=1, col=1)
+
+    headers = ['Sample', 'Elastic (%)', 'Viscoelastic (%)', 'Plastic (%)']
+    cols_d  = ['Sample', 'frac_elastic', 'frac_visco', 'frac_plastic']
+    table_vals = []
+    for col in cols_d:
+        if col == 'Sample':
+            table_vals.append(df[col].tolist() + ['<b>Mean</b>', '<b>Std Dev</b>'])
+        else:
+            cells  = [f"{v:.2f}" for v in df[col]]
+            cells += [f"<b>{means[col]:.2f}</b>", f"<b>{stds[col]:.2f}</b>"]
+            table_vals.append(cells)
+
+    fig.add_trace(go.Table(
+        header=dict(values=[f'<b>{h}</b>' for h in headers],
+                    fill_color='paleturquoise', align='left', font=dict(size=13)),
+        cells=dict(values=table_vals, fill_color='lavender',  align='left', font=dict(size=12)),
+    ), row=2, col=1)
+
+    fig.update_layout(
         barmode='stack',
         title_text='<b>Recovery Component Analysis</b>',
         title_x=0.5,
@@ -572,35 +603,11 @@ def build_recovery_component_figures(components: list[dict]) -> tuple[dict, dict
         yaxis=dict(title='Fraction (%)', range=[0, 108], autorange=False),
         plot_bgcolor='white',
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        height=560 + n_rows * 20,
+        margin=dict(l=60, r=20, t=60, b=40),
     )
 
-    # Table
-    cols_d = ['Sample','frac_elastic','frac_visco','frac_plastic']
-    df_t = df[cols_d].copy()
-    means_t = df_t[['frac_elastic','frac_visco','frac_plastic']].mean()
-    stds_t  = df_t[['frac_elastic','frac_visco','frac_plastic']].std(ddof=0).fillna(0)
-
-    table_vals = []
-    display_cols = ['Sample','frac_elastic','frac_visco','frac_plastic']
-    headers = ['Sample','Elastic (%)','Viscoelastic (%)','Plastic (%)']
-    for col in display_cols:
-        if col == 'Sample':
-            table_vals.append(df_t[col].tolist() + ['<b>Mean</b>','<b>Std Dev</b>'])
-        else:
-            cells = [f"{v:.2f}" for v in df_t[col]]
-            cells += [f"<b>{means_t[col]:.2f}</b>", f"<b>{stds_t[col]:.2f}</b>"]
-            table_vals.append(cells)
-
-    tbl = go.Figure(data=[go.Table(
-        header=dict(values=[f'<b>{h}</b>' for h in headers],
-                    fill_color='paleturquoise', align='left', font=dict(size=14)),
-        cells=dict(values=table_vals, fill_color='lavender', align='left', font=dict(size=13))
-    )])
-    tbl.update_layout(title_text="<b>Component Analysis Summary</b>",
-                      margin=dict(l=20,r=20,t=50,b=20), title_x=0.5,
-                      height=200+len(components)*40)
-
-    return bar.to_dict(), tbl.to_dict()
+    return fig.to_dict()
 
 
 # ---------------------------------------------------------------------------

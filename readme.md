@@ -114,14 +114,16 @@ Inferred values displayed **before analysis**:
 
 The **Shear Strain vs Time** preview plot is generated automatically when a Creep Recovery file is loaded, allowing you to validate σ₀ and t_release and set the pruning sliders before clicking Run Analysis.
 
-**Output tabs:**
+**Output tabs (in order):**
 
 | Tab | Content |
 |-----|---------|
+| Data Table | Raw parsed data for the selected sheet(s). |
+| Time Series | Shear Strain vs Time preview (same as pre-analysis plot). |
 | Creep/Recovery Fits | Shear Strain (absolute) vs Time with Burgers fit and optional Maxwell / Kelvin-Voigt overlays. R² scores in the plot title. |
 | Regression Parameters | Table of fitted G1, η1, G2, η2 (Pa / Pa·s) for all models and replicates. |
-| Recovery Components | Stacked bar chart partitioning total creep deformation into elastic, viscoelastic, and plastic fractions (%). |
-| Component Table | Mean ± std of each fraction across all replicates. |
+| Recovery Components (Burgers) | Stacked bar chart + summary table (mean ± std) partitioning total creep deformation into elastic, viscoelastic, and plastic fractions (%) derived analytically from the Burgers fit. |
+| Recovery Components (by hand) | Per-sample interactive view: define two Shear Strain thresholds per replicate — **ε₁** (end of elastic recovery / start of viscoelastic recovery) and **ε₂** (permanent/plastic deformation) — and fractions are computed in real time. A comparison column shows the corresponding Burgers fractions side-by-side. |
 
 All parameter changes and slider adjustments auto-trigger a re-analysis after the first manual run.
 
@@ -144,7 +146,7 @@ After the first run, any change to parameters, sliders, or sheet selection **aut
 
 ### 6 — Download results
 
-Click **Excel** or **CSV** to download the fitted parameter table for the current analysis.
+Click **Excel** or **CSV** to download the analysis results. For Creep Recovery, the export contains three sheets / files: **Fitted_Parameters** (σ₀, t_release, G1/η1/G2/η2, R² per model), **Recovery_Components_Burgers** (elastic / viscoelastic / plastic fractions with mean ± std), and **Recovery_Components_ByHand** (ε₁, ε₂, ε_total and fractions from the by-hand thresholds). The CSV format produces a **ZIP archive** containing one `.csv` per sheet; Excel produces a single multi-sheet `.xlsx`.
 
 ### 7 — Custom plot
 

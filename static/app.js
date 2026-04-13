@@ -1297,86 +1297,101 @@ function updateCreepPreviewZones() {
  * active=true  → Time Series tab is visible and its plot is rendered immediately.
  * active=false → tabs are appended but not active; Time Series renders lazily on click.
  */
-function _appendCreepPreviewTabs(active = false) {
+/**
+ * Append creep preview tabs.
+ * active    — whether the first appended tab is active.
+ * tblFirst  — if true, appends Data Table then Time Series; otherwise the reverse.
+ */
+function _appendCreepPreviewTabs(active = false, tblFirst = false) {
   if (!state.creepPreviewFig) return;
 
   const sheetNames   = Object.keys(state.sheets);
   const defaultSheet = sheetNames[0] || '';
 
   // ── Time Series tab ──
-  const tsId  = 'tab-pane-creep-ts';
-  const tsLi  = document.createElement('li');
-  tsLi.className = 'nav-item';
-  tsLi.innerHTML = `<button class="nav-link${active ? ' active' : ''}" data-bs-toggle="tab"
-    data-bs-target="#${tsId}" type="button">
-    <i class="bi bi-graph-up me-1"></i>Time Series
-  </button>`;
-  plotTabs.appendChild(tsLi);
+  const _addTs = (tsActive) => {
+    const tsId = 'tab-pane-creep-ts';
+    const tsLi = document.createElement('li');
+    tsLi.className = 'nav-item';
+    tsLi.innerHTML = `<button class="nav-link${tsActive ? ' active' : ''}" data-bs-toggle="tab"
+      data-bs-target="#${tsId}" type="button">
+      <i class="bi bi-graph-up me-1"></i>Time Series
+    </button>`;
+    plotTabs.appendChild(tsLi);
 
-  const tsPane = document.createElement('div');
-  tsPane.className = `tab-pane fade${active ? ' show active' : ''}`;
-  tsPane.id        = tsId;
-  tsPane.innerHTML = `<div class="plot-container" id="plot-div-creep-ts"></div>`;
-  plotTabContent.appendChild(tsPane);
+    const tsPane = document.createElement('div');
+    tsPane.className = `tab-pane fade${tsActive ? ' show active' : ''}`;
+    tsPane.id        = tsId;
+    tsPane.innerHTML = `<div class="plot-container" id="plot-div-creep-ts"></div>`;
+    plotTabContent.appendChild(tsPane);
 
-  const _renderTsPlot = () => {
-    const el = document.getElementById('plot-div-creep-ts');
-    if (!el || el.dataset.rendered) return;
-    el.dataset.rendered = '1';
-    const fig = JSON.parse(JSON.stringify(state.creepPreviewFig));
-    Plotly.newPlot(el, fig.data || [], fig.layout || {}, {
-      responsive: true, displayModeBar: true,
+    const _renderTsPlot = () => {
+      const el = document.getElementById('plot-div-creep-ts');
+      if (!el || el.dataset.rendered) return;
+      el.dataset.rendered = '1';
+      const fig = JSON.parse(JSON.stringify(state.creepPreviewFig));
+      Plotly.newPlot(el, fig.data || [], fig.layout || {}, {
+        responsive: true, displayModeBar: true,
+      });
+      setTimeout(() => updateCreepPreviewZones(), 80);
+    };
+
+    if (tsActive) setTimeout(_renderTsPlot, 50);
+
+    tsLi.querySelector('button').addEventListener('shown.bs.tab', () => {
+      _renderTsPlot();
+      const el = document.getElementById('plot-div-creep-ts');
+      if (el) Plotly.Plots.resize(el);
+      updateCreepPreviewZones();
     });
-    setTimeout(() => updateCreepPreviewZones(), 80);
   };
 
-  if (active) {
-    // Render immediately
-    setTimeout(_renderTsPlot, 50);
-  }
-
-  tsLi.querySelector('button').addEventListener('shown.bs.tab', () => {
-    _renderTsPlot();
-    const el = document.getElementById('plot-div-creep-ts');
-    if (el) Plotly.Plots.resize(el);
-    updateCreepPreviewZones();
-  });
-
   // ── Data Table tab ──
-  const tblId  = 'tab-pane-creep-tbl';
-  const tblLi  = document.createElement('li');
-  tblLi.className = 'nav-item';
-  tblLi.innerHTML = `<button class="nav-link" data-bs-toggle="tab"
-    data-bs-target="#${tblId}" type="button">
-    <i class="bi bi-table me-1"></i>Data Table
-  </button>`;
-  plotTabs.appendChild(tblLi);
+  const _addTbl = (tblActive) => {
+    const tblId = 'tab-pane-creep-tbl';
+    const tblLi = document.createElement('li');
+    tblLi.className = 'nav-item';
+    tblLi.innerHTML = `<button class="nav-link${tblActive ? ' active' : ''}" data-bs-toggle="tab"
+      data-bs-target="#${tblId}" type="button">
+      <i class="bi bi-table me-1"></i>Data Table
+    </button>`;
+    plotTabs.appendChild(tblLi);
 
-  const tblPane = document.createElement('div');
-  tblPane.className = 'tab-pane fade';
-  tblPane.id        = tblId;
-  tblPane.innerHTML = `
-    <div class="d-flex align-items-center gap-2 mb-2 mt-2">
-      <label class="small text-muted mb-0">Sheet:</label>
-      <select class="form-select form-select-sm" id="creep-tbl-sheet-sel"
-              style="width:auto;min-width:130px;">
-        ${sheetNames.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
-      </select>
-    </div>
-    <div id="creep-tbl-content"></div>`;
-  plotTabContent.appendChild(tblPane);
+    const tblPane = document.createElement('div');
+    tblPane.className = `tab-pane fade${tblActive ? ' show active' : ''}`;
+    tblPane.id        = tblId;
+    tblPane.innerHTML = `
+      <div class="d-flex align-items-center gap-2 mb-2 mt-2">
+        <label class="small text-muted mb-0">Sheet:</label>
+        <select class="form-select form-select-sm" id="creep-tbl-sheet-sel"
+                style="width:auto;min-width:130px;">
+          ${sheetNames.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
+        </select>
+      </div>
+      <div id="creep-tbl-content"></div>`;
+    plotTabContent.appendChild(tblPane);
 
-  tblLi.querySelector('button').addEventListener('shown.bs.tab', () => {
-    const sel = document.getElementById('creep-tbl-sheet-sel');
-    document.getElementById('creep-tbl-content').innerHTML =
-      _buildPreviewHTML(sel?.value || defaultSheet);
-  });
-  tblPane.addEventListener('change', e => {
-    if (e.target.id === 'creep-tbl-sheet-sel') {
+    const _renderTbl = () => {
+      const sel = document.getElementById('creep-tbl-sheet-sel');
       document.getElementById('creep-tbl-content').innerHTML =
-        _buildPreviewHTML(e.target.value);
-    }
-  });
+        _buildPreviewHTML(sel?.value || defaultSheet);
+    };
+
+    if (tblActive) setTimeout(_renderTbl, 50);
+
+    tblLi.querySelector('button').addEventListener('shown.bs.tab', _renderTbl);
+    tblPane.addEventListener('change', e => {
+      if (e.target.id === 'creep-tbl-sheet-sel') _renderTbl();
+    });
+  };
+
+  if (tblFirst) {
+    _addTbl(active);   // Data Table first (active)
+    _addTs(false);     // Time Series second
+  } else {
+    _addTs(active);    // Time Series first (active) — pre-analysis preview
+    _addTbl(false);
+  }
 }
 
 async function autoRunCreepPreview() {
@@ -1405,7 +1420,7 @@ async function autoRunCreepPreview() {
 
     plotTabs.innerHTML       = '';
     plotTabContent.innerHTML = '';
-    _appendCreepPreviewTabs(true);            // Time Series tab is active
+    _appendCreepPreviewTabs(true, true);      // Data Table first, then Time Series
     showPlotSection(true);
 
   } catch (e) {
@@ -1455,10 +1470,10 @@ function renderPlots(data) {
   plotTabContent.innerHTML = '';
   clearTimeout(_rerunTimer);
 
-  const figs   = data.figures || [];
-  const labels = data.figure_labels || figs.map((_, i) => `Plot ${i+1}`);
-  // Deep-copy all figures upfront to avoid mutation issues
+  const figs    = data.figures || [];
+  const labels  = data.figure_labels || figs.map((_, i) => `Plot ${i+1}`);
   const figData = figs.map(f => JSON.parse(JSON.stringify(f)));
+  const isCreep = data.test_type === 'creep_recovery';
 
   setAxisScaleState('x', 'linear');
   setAxisScaleState('y', 'linear');
@@ -1474,9 +1489,15 @@ function renderPlots(data) {
     if (i === 0) setTimeout(() => updateFitPlotExclusionZones(), 80);
   };
 
+  // For creep_recovery: Data Table then Time Series go FIRST (Data Table active)
+  if (isCreep && state.creepPreviewFig) {
+    _appendCreepPreviewTabs(true, true);   // active=true, tblFirst=true
+  }
+
+  // Main analysis tabs — not active for creep (preview tabs are first)
   figs.forEach((fig, i) => {
     const id     = `tab-pane-fit-${i}`;
-    const active = i === 0;
+    const active = !isCreep && i === 0;
 
     const li = document.createElement('li');
     li.className = 'nav-item';
@@ -1492,16 +1513,16 @@ function renderPlots(data) {
     plotTabContent.appendChild(pane);
   });
 
-  // Append creep preview tabs (Time Series + Data Table) after analysis tabs
-  if (data.test_type === 'creep_recovery' && state.creepPreviewFig) {
-    _appendCreepPreviewTabs(false);   // not active — lazy render on click
+  // Recovery Components (by hand) — always last for creep_recovery
+  if (isCreep && data.creep_samples?.length) {
+    _appendByHandTab(data.creep_samples);
   }
 
   showPlotSection(true);
   updateDescription(data.test_type, labels[0]);
 
-  // Render the first (active) tab now; others render on first click
-  setTimeout(() => renderFig(0), 30);
+  // For non-creep: render first tab immediately; for creep: lazy on click
+  if (!isCreep) setTimeout(() => renderFig(0), 30);
 
   plotTabs.querySelectorAll('[data-fig-index]').forEach(btn => {
     btn.addEventListener('shown.bs.tab', () => {
@@ -1512,6 +1533,214 @@ function renderPlots(data) {
       updateDescription(data.test_type, labels[i]);
     });
   });
+}
+
+// ===== Recovery Components — by hand =====
+
+/**
+ * Append the "Recovery Components (by hand)" tab.
+ * Each creep sample gets its own card with a mini Plotly figure and two
+ * threshold inputs (ε₁ = elastic/VE boundary, ε₂ = permanent deformation).
+ * All computation is client-side: no extra network call is needed.
+ */
+function _appendByHandTab(creepSamples) {
+  // --- Tab button ---
+  const li = document.createElement('li');
+  li.className = 'nav-item';
+  li.innerHTML =
+    `<button class="nav-link" id="by-hand-tab-btn" data-bs-toggle="tab"
+             data-bs-target="#by-hand-tab-pane" type="button" role="tab">
+       Recovery Components (by hand)
+     </button>`;
+  plotTabs.appendChild(li);
+
+  // --- Tab pane ---
+  const pane = document.createElement('div');
+  pane.className = 'tab-pane fade';
+  pane.id = 'by-hand-tab-pane';
+  pane.setAttribute('role', 'tabpanel');
+
+  // Initialise threshold state with default values (used for export)
+  state.byHandThresholds = {};
+  creepSamples.forEach((cs, idx) => {
+    state.byHandThresholds[cs.sample] = {
+      eps1:      cs.eps1_default,
+      eps2:      cs.eps2_default,
+      eps_total: cs.eps_total,
+    };
+    pane.appendChild(_buildByHandCard(cs, idx));
+  });
+
+  plotTabContent.appendChild(pane);
+
+  // Lazy-render all mini-plots when the tab becomes visible for the first time
+  const tabBtn = li.querySelector('button');
+  tabBtn.addEventListener('shown.bs.tab', () => {
+    creepSamples.forEach((cs, idx) => _initByHandPlot(cs, idx));
+  });
+}
+
+/** Build the DOM card for one sample (plot + inputs + fraction display). */
+function _buildByHandCard(cs, idx) {
+  const card = document.createElement('div');
+  card.className = 'card mb-3';
+
+  const hasBurgers = cs.burgers_fracs !== null && cs.burgers_fracs !== undefined;
+  const burgersCols = hasBurgers
+    ? `<th class="text-center" style="color:#888">Burgers</th>` : '';
+
+  card.innerHTML = `
+    <div class="card-header fw-semibold d-flex align-items-center gap-2">
+      ${cs.sample}
+      <span class="badge bg-secondary fw-normal ms-1">
+        ε<sub>total</sub> = ${cs.eps_total.toFixed(5)}
+      </span>
+    </div>
+    <div class="card-body">
+      <div class="row g-3 align-items-start flex-nowrap">
+        <div class="col" style="min-width:0;overflow:hidden;">
+          <div id="bh-plot-${idx}" style="height:280px;width:100%;"></div>
+        </div>
+        <div class="col-auto" style="width:260px;">
+
+        <label class="form-label small fw-semibold mb-1" style="color:#ff7f0e">
+          ε₁ — fin du recouvrement élastique
+        </label>
+        <div class="input-group input-group-sm mb-3">
+          <input type="number" class="form-control" id="bh-eps1-${idx}"
+                 step="0.00001" value="${cs.eps1_default.toFixed(5)}"
+                 min="0" max="${cs.eps_total.toFixed(5)}">
+          <span class="input-group-text">—</span>
+        </div>
+
+        <label class="form-label small fw-semibold mb-1" style="color:#4CAF50">
+          ε₂ — déformation permanente
+        </label>
+        <div class="input-group input-group-sm mb-3">
+          <input type="number" class="form-control" id="bh-eps2-${idx}"
+                 step="0.00001" value="${cs.eps2_default.toFixed(5)}"
+                 min="0" max="${cs.eps_total.toFixed(5)}">
+          <span class="input-group-text">—</span>
+        </div>
+
+        <table class="table table-sm table-bordered small text-center mb-0"
+               id="bh-fracs-${idx}">
+          <thead class="table-light">
+            <tr>
+              <th>Composante</th>
+              <th>By hand</th>
+              ${burgersCols}
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span style="color:#2196F3">■</span> Élastique</td>
+              <td id="bh-fel-${idx}">—</td>
+              ${hasBurgers ? `<td class="text-muted">${cs.burgers_fracs.elastic.toFixed(1)} %</td>` : ''}
+            </tr>
+            <tr>
+              <td><span style="color:#FF9800">■</span> Viscoélastique</td>
+              <td id="bh-fve-${idx}">—</td>
+              ${hasBurgers ? `<td class="text-muted">${cs.burgers_fracs.viscoelastic.toFixed(1)} %</td>` : ''}
+            </tr>
+            <tr>
+              <td><span style="color:#4CAF50">■</span> Plastique</td>
+              <td id="bh-fpl-${idx}">—</td>
+              ${hasBurgers ? `<td class="text-muted">${cs.burgers_fracs.plastic.toFixed(1)} %</td>` : ''}
+            </tr>
+          </tbody>
+        </table>
+        </div><!-- col-auto -->
+      </div><!-- row -->
+    </div><!-- card-body -->`;
+
+  // Wire inputs after insertion
+  setTimeout(() => {
+    const inp1 = document.getElementById(`bh-eps1-${idx}`);
+    const inp2 = document.getElementById(`bh-eps2-${idx}`);
+    if (!inp1 || !inp2) return;
+    const onChange = () => {
+      const e1 = parseFloat(inp1.value) || 0;
+      const e2 = parseFloat(inp2.value) || 0;
+      if (state.byHandThresholds) {
+        state.byHandThresholds[cs.sample] = { eps1: e1, eps2: e2, eps_total: cs.eps_total };
+      }
+      _updateByHandCard(idx, e1, e2, cs.eps_total, cs.t_release);
+    };
+    inp1.addEventListener('input', onChange);
+    inp2.addEventListener('input', onChange);
+  }, 0);
+
+  return card;
+}
+
+/** Render the Plotly figure for one card (called lazily on tab-shown). */
+function _initByHandPlot(cs, idx) {
+  const el = document.getElementById(`bh-plot-${idx}`);
+  if (!el || el.dataset.rendered) return;
+  el.dataset.rendered = '1';
+
+  const eps1 = parseFloat(document.getElementById(`bh-eps1-${idx}`)?.value) || cs.eps1_default;
+  const eps2 = parseFloat(document.getElementById(`bh-eps2-${idx}`)?.value) || cs.eps2_default;
+
+  const trace = {
+    x: cs.t, y: cs.strain,
+    mode: 'markers',
+    marker: { color: '#1f77b4', size: 3, symbol: 'circle-open' },
+    name: 'Shear Strain',
+    hovertemplate: 't=%{x:.2f} s<br>ε=%{y:.5f}<extra></extra>',
+  };
+
+  const layout = {
+    margin: { l: 60, r: 10, t: 10, b: 40 },
+    xaxis: { title: 'Time (s)' },
+    yaxis: { title: 'Shear Strain' },
+    showlegend: false,
+    plot_bgcolor: 'white',
+    shapes: [
+      // Vertical line at t_release
+      { type: 'line', x0: cs.t_release, x1: cs.t_release, y0: 0, y1: 1,
+        yref: 'paper', line: { color: '#888', dash: 'dot', width: 1.5 } },
+      // ε₁ horizontal line (orange) — shape index 1
+      { type: 'line', x0: cs.t_release, x1: cs.t_max, y0: eps1, y1: eps1,
+        line: { color: '#ff7f0e', dash: 'dash', width: 2 } },
+      // ε₂ horizontal line (green) — shape index 2
+      { type: 'line', x0: cs.t_release, x1: cs.t_max, y0: eps2, y1: eps2,
+        line: { color: '#4CAF50', dash: 'dash', width: 2 } },
+    ],
+  };
+
+  Plotly.newPlot(el, [trace], layout, { responsive: true, displayModeBar: false });
+
+  // First fraction update
+  _updateByHandCard(idx, eps1, eps2, cs.eps_total, cs.t_release);
+}
+
+/** Update threshold lines and fraction table for one sample card. */
+function _updateByHandCard(idx, eps1, eps2, epsTotal, tRelease) {
+  // Enforce epsTotal ≥ eps1 ≥ eps2 ≥ 0
+  eps2 = Math.max(0, Math.min(eps2, epsTotal));
+  eps1 = Math.max(eps2, Math.min(eps1, epsTotal));
+
+  // Move the horizontal lines on the plot
+  const el = document.getElementById(`bh-plot-${idx}`);
+  if (el?._fullLayout) {
+    Plotly.relayout(el, {
+      'shapes[1].y0': eps1, 'shapes[1].y1': eps1,
+      'shapes[2].y0': eps2, 'shapes[2].y1': eps2,
+    });
+  }
+
+  // Compute fractions
+  const fEl = epsTotal > 0 ? 100 * (epsTotal - eps1) / epsTotal : 0;
+  const fVe = epsTotal > 0 ? 100 * (eps1  - eps2)  / epsTotal : 0;
+  const fPl = epsTotal > 0 ? 100 *  eps2            / epsTotal : 0;
+
+  const fmt = v => `${v.toFixed(1)} %`;
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  set(`bh-fel-${idx}`, fmt(fEl));
+  set(`bh-fve-${idx}`, fmt(fVe));
+  set(`bh-fpl-${idx}`, fmt(fPl));
 }
 
 // ===== Axis scale =====
@@ -1557,6 +1786,9 @@ async function triggerDownload(fmt) {
   fd.append('interval_selections', JSON.stringify(collectIntervalSelections()));
   fd.append('sheet_test_types',    JSON.stringify(state.sheetTestTypes));
   fd.append('download_format',     fmt);
+  if (state.byHandThresholds && Object.keys(state.byHandThresholds).length > 0) {
+    fd.append('by_hand_thresholds', JSON.stringify(state.byHandThresholds));
+  }
 
   try {
     const res = await fetch('/api/download', { method: 'POST', body: fd });
