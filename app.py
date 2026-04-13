@@ -17,7 +17,8 @@ from analysis.parser import (detect_test_type, extract_sheet_data, get_data_df,
                               get_interval_info, get_units, split_intervals)
 from analysis.amplitude import analyze_lver, build_amplitude_figures
 from analysis.creep import (analyze_creep_recovery, build_creep_figures,
-                             build_recovery_component_figures, evaluate_recovery_components)
+                             build_recovery_component_figures, evaluate_recovery_components,
+                             infer_sigma0, infer_t_release)
 from analysis.frequency import analyze_frequency_sweep, build_frequency_figures
 from analysis.relaxation import analyze_stress_relaxation, build_relaxation_figures
 from analysis.temperature import analyze_temperature_sweep, build_temperature_figures
@@ -97,7 +98,7 @@ def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tu
         t_release  = None if t_release_raw == "auto" else float(t_release_raw)
         en_maxwell = bool(p.get("enable_maxwell", False))
         en_kelvin  = bool(p.get("enable_kelvin", False))
-        prune_win  = float(p.get("prune_window", 2.0))
+        prune_win  = float(p.get("prune_window", 0.0))
 
         results = analyze_creep_recovery(
             dataframes_list, t_release,
@@ -106,6 +107,8 @@ def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tu
             enable_kelvin=en_kelvin,
             prune_window=prune_win,
             exclude_ranges=p.get("exclude_ranges", []),
+            prune_start_n=int(p.get("prune_start_n", 0)),
+            prune_release_n=int(p.get("prune_release_n", 0)),
         )
         overlay = bool(p.get("overlay", False))
         multi, table = build_creep_figures(results, units, en_maxwell, en_kelvin, overlay=overlay)
@@ -207,7 +210,9 @@ def _build_items(sheets, selected_names, iv_sel, stt_overrides, combine: bool = 
             raise HTTPException(status_code=404, detail=f"Sheet '{name}' not found.")
         df = sheets[name]
         data_df = get_data_df(df)
-        intervals = split_intervals(data_df)
+        eff_tt = stt_overrides.get(name) or detect_test_type(data_df)
+        split_on_gaps = eff_tt != "creep_recovery"
+        intervals = split_intervals(data_df, split_on_gaps=split_on_gaps)
 
         # Apply interval selection
         sel = iv_sel.get(name)
@@ -217,7 +222,6 @@ def _build_items(sheets, selected_names, iv_sel, stt_overrides, combine: bool = 
             intervals = [data_df]
 
         units.update(get_units(df))
-        eff_tt = stt_overrides.get(name) or detect_test_type(data_df)
 
         if combine and len(intervals) > 1:
             combined = _combine_intervals(intervals)
@@ -265,19 +269,30 @@ async def parse_file(file: UploadFile = File(...)):
     result = {}
     for name, df in sheets.items():
         data_df = get_data_df(df)
-        ivs = split_intervals(data_df)
-        first_iv = ivs[0] if ivs else data_df
-        sample = (first_iv.head(20)
-                  .where(pd.notna(first_iv.head(20)), None)
-                  .to_dict('records'))
+        tt = detect_test_type(data_df)
+        split_on_gaps = tt != "creep_recovery"
+        ivs = split_intervals(data_df, split_on_gaps=split_on_gaps)
+        full_data = pd.concat(ivs, ignore_index=True) if ivs else data_df
+        sample = full_data.where(pd.notna(full_data), None).to_dict('records')
+
+        inferred: dict = {}
+        if tt == "creep_recovery":
+            s0  = infer_sigma0(full_data)
+            t_r = infer_t_release(full_data)
+            inferred = {
+                "sigma0":    s0,
+                "t_release": t_r,
+            }
+
         result[name] = {
             "columns":     list(df.columns),
-            "n_rows":      len(data_df),
+            "n_rows":      len(full_data),
             "n_intervals": len(ivs),
-            "intervals":   get_interval_info(data_df),
-            "test_type":   detect_test_type(data_df),
+            "intervals":   get_interval_info(data_df, split_on_gaps=split_on_gaps),
+            "test_type":   tt,
             "units":       get_units(df),
             "sample_data": sample,
+            "inferred":    inferred,
         }
 
     return _jsonify({"sheets": result, "file_size_kb": round(len(raw)/1024, 1)})
@@ -393,6 +408,8 @@ async def download_results(
             drop_index=p.get("drop_index", []),
             enable_maxwell=bool(p.get("enable_maxwell", False)),
             enable_kelvin=bool(p.get("enable_kelvin", False)),
+            prune_start_n=int(p.get("prune_start_n", 0)),
+            prune_release_n=int(p.get("prune_release_n", 0)),
         )
         rows = []
         for res in results:
@@ -511,7 +528,8 @@ async def raw_plot(
             continue
         df      = sheets[name]
         data_df = get_data_df(df)
-        intervals = split_intervals(data_df)
+        tt = detect_test_type(data_df)
+        intervals = split_intervals(data_df, split_on_gaps=(tt != "creep_recovery"))
         all_units.update(get_units(df))
 
         sel = iv_sel.get(name)

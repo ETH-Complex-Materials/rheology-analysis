@@ -2,6 +2,8 @@
 Creep Recovery analysis — Burgers, Maxwell, Kelvin-Voigt model fitting.
 Ported from interface.py (Gabriel David, 2025).
 """
+import re
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -75,6 +77,32 @@ def _r2(y_true, y_pred):
     return 1 - ss_res / ss_tot
 
 
+def _infer_sigma0_from_name(sample_name: str) -> float | None:
+    """
+    Extract σ₀ from explicit stress markers in a sample/file name.
+
+    Accepts patterns such as:
+    - "50Pa"
+    - "50 Pa"
+    - "stress_50pa"
+
+    Intentionally ignores generic digits like "S1" to avoid false positives.
+    """
+    if not sample_name:
+        return None
+
+    match = re.search(
+        r"(?<![A-Za-z0-9])(\d+(?:\.\d+)?)\s*pa(?=$|[^A-Za-z0-9])",
+        sample_name,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    val = float(match.group(1))
+    return val if val > 0 else None
+
+
 # ---------------------------------------------------------------------------
 # Main analysis function
 # ---------------------------------------------------------------------------
@@ -82,14 +110,23 @@ def _r2(y_true, y_pred):
 def _auto_detect_t_release(df: pd.DataFrame) -> float | None:
     """
     Detect stress release time.
-    Strategy 1: first NaN/negative creep-compliance after valid data.
-    Strategy 2: time of peak shear strain (strain is maximum at t_release).
+    Primary strategy: time of the global Shear Strain maximum.
+    Fallback: first NaN/negative creep-compliance after valid data.
     """
     if 'Time' not in df.columns:
         return None
     t_col = pd.to_numeric(df['Time'], errors='coerce')
 
-    # Strategy 1 – compliance goes NaN at stress release
+    # Primary strategy – t_release = time of the global Shear Strain maximum for t > 5 s
+    # The 5 s guard excludes instrument artefacts at the very start of the series.
+    if 'Shear Strain' in df.columns:
+        strain = pd.to_numeric(df['Shear Strain'], errors='coerce')
+        valid = strain.notna() & t_col.notna() & (strain > 0) & (t_col > 5.0)
+        if valid.sum() > 10:
+            peak_idx = strain[valid].idxmax()
+            return float(t_col[peak_idx])
+
+    # Fallback – compliance goes NaN/negative at stress release
     if 'Creep Compliance' in df.columns:
         comp = pd.to_numeric(df['Creep Compliance'], errors='coerce')
         valid_mask = comp.notna() & (comp > 0)
@@ -98,18 +135,6 @@ def _auto_detect_t_release(df: pd.DataFrame) -> float | None:
             after_valid = (~valid_mask) & (t_col > t_col[valid_mask].median())
             if after_valid.any():
                 return float(t_col[after_valid.idxmax()])
-
-    # Strategy 2 – strain peaks at t_release
-    if 'Shear Strain' in df.columns:
-        strain = pd.to_numeric(df['Shear Strain'], errors='coerce')
-        valid = strain.notna() & t_col.notna() & (strain > 0)
-        if valid.sum() > 10:
-            peak_idx = strain[valid].idxmax()
-            t_peak = float(t_col[peak_idx])
-            t_max  = float(t_col[valid].max())
-            # Only use if peak is not at the very tail of the data (would be t_end, not t_release)
-            if t_peak < 0.92 * t_max:
-                return t_peak
 
     return None
 
@@ -120,8 +145,10 @@ def analyze_creep_recovery(
     drop_index=None,
     enable_maxwell: bool = False,
     enable_kelvin: bool = False,
-    prune_window: float = 2.0,
+    prune_window: float = 0.0,
     exclude_ranges: list | None = None,
+    prune_start_n: int = 0,
+    prune_release_n: int = 0,
 ) -> list[dict]:
     """
     Fit viscoelastic models to creep-recovery data.
@@ -137,7 +164,13 @@ def analyze_creep_recovery(
     enable_maxwell / enable_kelvin : bool
         Whether to fit optional models.
     prune_window : float
-        Seconds around t_release to prune (removes oscillation artefacts).
+        Legacy time-based pruning after t_release. Disabled by default; overridden
+        when prune_release_n > 0.
+    prune_start_n : int
+        Number of data points to exclude from the beginning of the series (Zone 1).
+    prune_release_n : int
+        Number of data points to exclude right after t_release (Zone 2).
+        When > 0, takes precedence over prune_window for the post-release region.
 
     Returns
     -------
@@ -149,22 +182,12 @@ def analyze_creep_recovery(
         if 'Time' not in df.columns or 'Shear Strain' not in df.columns:
             continue
 
-        # Auto-detect sigma0 from: (1) sample name, (2) Shear Stress column,
-        # (3) first-point strain/compliance ratio, (4) fallback 1.0 Pa
-        sigma0 = None
-        try:
-            chunk = sample_name.split("_")[-1] if "_" in sample_name else sample_name
-            val = float(''.join(c for c in chunk if c.isdigit() or c == '.'))
-            if val > 0:
-                sigma0 = val
-        except (ValueError, IndexError):
-            pass
-
+        # Use the same σ₀ inference as the pre-analysis UI to keep displayed and
+        # fitted values consistent. Only fall back to the sample name when the
+        # data columns do not provide a reliable estimate.
+        sigma0 = infer_sigma0(df)
         if sigma0 is None or sigma0 == 0:
-            if 'Shear Stress' in df.columns:
-                ss = pd.to_numeric(df['Shear Stress'], errors='coerce').dropna()
-                if len(ss):
-                    sigma0 = float(ss.iloc[:10].median())  # median of first 10 pts
+            sigma0 = _infer_sigma0_from_name(sample_name)
 
         if sigma0 is None or sigma0 == 0:
             if 'Creep Compliance' in df.columns:
@@ -202,11 +225,27 @@ def analyze_creep_recovery(
         if len(t) == 0:
             continue
 
-        # Prune noisy transition window around stress release
-        keep = ~((t > t_rel - 0.5) & (t < t_rel + prune_window))
-        t, s = t[keep], s[keep]
+        # Shear Strain is always stored in % by the instrument; convert to absolute.
+        s = s / 100.0
 
-        # Apply user-defined exclusion ranges (e.g. initial loading ramp)
+        # Zone 1 — exclude first prune_start_n data points (initial loading transient)
+        if prune_start_n > 0 and prune_start_n < len(t):
+            t, s = t[prune_start_n:], s[prune_start_n:]
+
+        # Zone 2 — exclude first prune_release_n data points after t_release
+        #           (stress-release oscillation artefact); falls back to prune_window if 0
+        if prune_release_n > 0:
+            after_idx = np.where(t > t_rel)[0]
+            if len(after_idx) > 0:
+                n_excl = min(prune_release_n, len(after_idx))
+                excl = np.zeros(len(t), dtype=bool)
+                excl[after_idx[:n_excl]] = True
+                t, s = t[~excl], s[~excl]
+        elif prune_window > 0:
+            keep_post = ~((t > t_rel) & (t < t_rel + prune_window))
+            t, s = t[keep_post], s[keep_post]
+
+        # Additional user-defined exclusion ranges (kept for backward compatibility)
         if exclude_ranges:
             for t_lo, t_hi in exclude_ranges:
                 excl = (t >= float(t_lo)) & (t <= float(t_hi))
@@ -215,27 +254,18 @@ def analyze_creep_recovery(
         if len(t) == 0:
             continue
 
-        dt = np.diff(np.concatenate(([t[0]], t)))
-        dt_mean = dt.mean()
-        if dt_mean > 0 and np.isfinite(dt_mean):
-            w = dt / dt_mean
-            sigma_raw = 1 / np.sqrt(np.abs(w) + 1e-16)
-            sigma_w = sigma_raw if np.all(np.isfinite(sigma_raw)) else None
-        else:
-            sigma_w = None
-
-        res = {"Sample": sample_name, "t_release": t_rel,
+        res = {"Sample": sample_name, "sigma0": sigma0, "t_release": t_rel,
                "experimental_data": {"t": t.tolist(), "strain": s.tolist()}}
 
         # Burgers (always)
         def _b(t, E1, eta1, E2, eta2):
             return _burgers_creep(t, E1, eta1, E2, eta2, sigma0, t_rel)
         try:
-            p, _ = curve_fit(_b, t, s, p0=[1000,100000,1000,10000],
-                             sigma=sigma_w, bounds=(0,np.inf), maxfev=10000)
+            p, _ = curve_fit(_b, t, s, p0=[10000, 1e8, 10000, 1e6],
+                             bounds=(0,np.inf), maxfev=10000)
             fit = _b(t, *p)
-            res["params_burgers"] = {"E1 (Pa)": p[0], "η1 (Pa·s)": p[1],
-                                     "E2 (Pa)": p[2], "η2 (Pa·s)": p[3],
+            res["params_burgers"] = {"G1 (Pa)": p[0], "η1 (Pa·s)": p[1],
+                                     "G2 (Pa)": p[2], "η2 (Pa·s)": p[3],
                                      "R2 Score": _r2(s, fit)}
             res["fitted_data_burgers"] = {"strain": fit.tolist()}
         except RuntimeError:
@@ -247,11 +277,11 @@ def analyze_creep_recovery(
             def _m(t, E, eta):
                 return _maxwell_creep(t, E, eta, sigma0, t_rel)
             try:
-                p, _ = curve_fit(_m, t, s, p0=[1000,10000],
-                                 sigma=sigma_w, bounds=(0,np.inf), maxfev=5000)
+                p, _ = curve_fit(_m, t, s, p0=[10000, 1e8],
+                                 bounds=(0,np.inf), maxfev=5000)
                 fit = _m(t, *p)
-                res["params_maxwell"] = {"E (Pa)": p[0], "η (Pa·s)": p[1],
-                                         "R2 Score": _r2(s, fit)}
+                res["params_maxwell"] = {"G (Pa)": p[0], "η (Pa·s)": p[1],
+                                        "R2 Score": _r2(s, fit)}
                 res["fitted_data_maxwell"] = {"strain": fit.tolist()}
             except RuntimeError:
                 res["params_maxwell"] = {"Error": "Fit failed"}
@@ -262,11 +292,11 @@ def analyze_creep_recovery(
             def _k(t, E, eta):
                 return _kelvin_creep(t, E, eta, sigma0, t_rel)
             try:
-                p, _ = curve_fit(_k, t, s, p0=[1000,10000],
-                                 sigma=sigma_w, bounds=(0,np.inf), maxfev=5000)
+                p, _ = curve_fit(_k, t, s, p0=[10000, 1e6],
+                                 bounds=(0,np.inf), maxfev=5000)
                 fit = _k(t, *p)
-                res["params_kelvin"] = {"E (Pa)": p[0], "η (Pa·s)": p[1],
-                                        "R2 Score": _r2(s, fit)}
+                res["params_kelvin"] = {"G (Pa)": p[0], "η (Pa·s)": p[1],
+                                       "R2 Score": _r2(s, fit)}
                 res["fitted_data_kelvin"] = {"strain": fit.tolist()}
             except RuntimeError:
                 res["params_kelvin"] = {"Error": "Fit failed"}
@@ -352,9 +382,14 @@ def build_creep_figures(
             vis = [False]*len(all_traces)
             for j in range(i*traces_per, i*traces_per + traces_per):
                 vis[j] = True
-            r2_str = ""
+            r2_parts = []
             if "params_burgers" in res and "R2 Score" in res["params_burgers"]:
-                r2_str = f" | Burgers R²={res['params_burgers']['R2 Score']:.3f}"
+                r2_parts.append(f"Burgers R²={res['params_burgers']['R2 Score']:.3f}")
+            if enable_maxwell and "params_maxwell" in res and "R2 Score" in res["params_maxwell"]:
+                r2_parts.append(f"Maxwell R²={res['params_maxwell']['R2 Score']:.3f}")
+            if enable_kelvin and "params_kelvin" in res and "R2 Score" in res["params_kelvin"]:
+                r2_parts.append(f"KV R²={res['params_kelvin']['R2 Score']:.3f}")
+            r2_str = (" | " + " | ".join(r2_parts)) if r2_parts else ""
             buttons.append(dict(label=res["Sample"], method="update",
                                 args=[{"visible": vis},
                                       {"title": f"<b>{res['Sample']}</b>{r2_str}"}]))
@@ -365,8 +400,14 @@ def build_creep_figures(
             title0 = "<b>All Samples — Overlay</b>"
         else:
             res0 = analysis_results[0]
-            r2_b = res0.get("params_burgers", {}).get("R2 Score", None)
-            title0 = f"<b>{res0['Sample']}</b>" + (f" | Burgers R²={r2_b:.3f}" if r2_b else "")
+            r2_parts0 = []
+            if res0.get("params_burgers", {}).get("R2 Score") is not None:
+                r2_parts0.append(f"Burgers R²={res0['params_burgers']['R2 Score']:.3f}")
+            if enable_maxwell and res0.get("params_maxwell", {}).get("R2 Score") is not None:
+                r2_parts0.append(f"Maxwell R²={res0['params_maxwell']['R2 Score']:.3f}")
+            if enable_kelvin and res0.get("params_kelvin", {}).get("R2 Score") is not None:
+                r2_parts0.append(f"KV R²={res0['params_kelvin']['R2 Score']:.3f}")
+            title0 = f"<b>{res0['Sample']}</b>" + ((" | " + " | ".join(r2_parts0)) if r2_parts0 else "")
 
     if buttons:
         multi.update_layout(
@@ -377,7 +418,7 @@ def build_creep_figures(
     multi.update_layout(
         title=title0, title_x=0.5,
         xaxis_title=f"Time ({time_unit})",
-        yaxis_title=f"Shear Strain ({strain_unit})",
+        yaxis_title="Shear Strain",
         legend_title_text="Legend"
     )
 
@@ -394,16 +435,16 @@ def build_creep_figures(
     df = pd.DataFrame(params_rows) if params_rows else pd.DataFrame()
 
     if not df.empty:
-        if "E (Pa)" in df.columns:
-            if "E1 (Pa)" not in df.columns:
-                df["E1 (Pa)"] = np.nan
-            df["E1 (Pa)"] = df["E1 (Pa)"].fillna(df["E (Pa)"])
+        if "G (Pa)" in df.columns:
+            if "G1 (Pa)" not in df.columns:
+                df["G1 (Pa)"] = np.nan
+            df["G1 (Pa)"] = df["G1 (Pa)"].fillna(df["G (Pa)"])
         if "η (Pa·s)" in df.columns:
             if "η1 (Pa·s)" not in df.columns:
                 df["η1 (Pa·s)"] = np.nan
             df["η1 (Pa·s)"] = df["η1 (Pa·s)"].fillna(df["η (Pa·s)"])
 
-        cols = ['Sample', 'Model', 'R2 Score', 'E1 (Pa)', 'η1 (Pa·s)', 'E2 (Pa)', 'η2 (Pa·s)']
+        cols = ['Sample', 'Model', 'R2 Score', 'G1 (Pa)', 'η1 (Pa·s)', 'G2 (Pa)', 'η2 (Pa·s)']
         df = df.reindex(columns=cols)
 
         table_vals = []
@@ -440,14 +481,15 @@ def evaluate_recovery_components(analysis_results: list[dict], t_release: float 
     components = []
     for res in analysis_results:
         p = res.get("params_burgers", {})
-        if "Error" in p:
+        # Skip if fit failed or if all four Burgers parameters are absent
+        if not p or "Error" in p or "G1 (Pa)" not in p:
             continue
-        sample_name = res["Sample"]
+        sample_name = str(res["Sample"])
         # Clamp to avoid division by zero at parameter boundaries
-        E1   = max(float(p.get("E1 (Pa)",   1e-9)), 1e-9)
-        eta1 = max(float(p.get("η1 (Pa·s)", 1e-9)), 1e-9)
-        E2   = max(float(p.get("E2 (Pa)",   1e-9)), 1e-9)
-        eta2 = max(float(p.get("η2 (Pa·s)", 1e-9)), 1e-9)
+        E1   = max(float(p["G1 (Pa)"]),   1e-9)
+        eta1 = max(float(p["η1 (Pa·s)"]), 1e-9)
+        E2   = max(float(p["G2 (Pa)"]),   1e-9)
+        eta2 = max(float(p["η2 (Pa·s)"]), 1e-9)
 
         # sigma0 cancels in the fractions, so any positive value works
         sigma0 = 1.0
@@ -526,8 +568,8 @@ def build_recovery_component_figures(components: list[dict]) -> tuple[dict, dict
         barmode='stack',
         title_text='<b>Recovery Component Analysis</b>',
         title_x=0.5,
-        xaxis_title='Sample',
-        yaxis=dict(title='Fraction (%)', range=[0, 108]),
+        xaxis=dict(title='Sample', type='category'),
+        yaxis=dict(title='Fraction (%)', range=[0, 108], autorange=False),
         plot_bgcolor='white',
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
     )
@@ -559,3 +601,44 @@ def build_recovery_component_figures(components: list[dict]) -> tuple[dict, dict
                       height=200+len(components)*40)
 
     return bar.to_dict(), tbl.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Pre-analysis inference helpers (used by the parser/API to display values
+# before the user launches a fit)
+# ---------------------------------------------------------------------------
+
+def infer_sigma0(df: pd.DataFrame) -> float | None:
+    """
+    Infer σ₀ from a DataFrame without a sample name.
+    Strategy 1: median of the first 10 positive Shear Stress values.
+    Strategy 2: strain/compliance ratio from early creep points.
+    Returns None when no reliable estimate can be made.
+    """
+    if 'Shear Stress' in df.columns:
+        ss = pd.to_numeric(df['Shear Stress'], errors='coerce').dropna()
+        ss = ss[ss > 0]
+        if len(ss):
+            val = float(ss.iloc[:10].median())
+            if val > 0:
+                return val
+
+    if 'Creep Compliance' in df.columns and 'Shear Strain' in df.columns:
+        strain_col = pd.to_numeric(df['Shear Strain'], errors='coerce')
+        comp_col   = pd.to_numeric(df['Creep Compliance'], errors='coerce')
+        valid = strain_col.notna() & comp_col.notna() & (comp_col > 0)
+        if valid.any():
+            idx_valid = np.where(valid)[0][:20]
+            s_vals = strain_col.values[idx_valid]
+            c_vals = comp_col.values[idx_valid]
+            ratio = np.median(s_vals / c_vals)
+            val = ratio / 100.0 if ratio > 200 else ratio
+            if val > 0:
+                return val
+
+    return None
+
+
+def infer_t_release(df: pd.DataFrame) -> float | None:
+    """Public wrapper around _auto_detect_t_release for pre-analysis display."""
+    return _auto_detect_t_release(df)

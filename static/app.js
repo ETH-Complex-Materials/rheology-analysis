@@ -8,15 +8,15 @@ const DESCRIPTIONS = {
     'Creep/Recovery Fits': `
       <p>The <strong>four-element Burgers model</strong> decomposes deformation into three additive contributions.</p>
       <p><strong>Creep phase</strong> ($t \\le t_\\text{release}$):</p>
-      $$\\varepsilon(t) = \\underbrace{\\frac{\\sigma_0}{E_1}}_{\\text{elastic}} + \\underbrace{\\frac{\\sigma_0}{\\eta_1}\\,t}_{\\text{viscous flow}} + \\underbrace{\\frac{\\sigma_0}{E_2}\\!\\left(1-e^{-t/\\tau_2}\\right)}_{\\text{retarded elastic}}$$
+      $$\\varepsilon(t) = \\underbrace{\\frac{\\sigma_0}{G_1}}_{\\text{elastic}} + \\underbrace{\\frac{\\sigma_0}{\\eta_1}\\,t}_{\\text{viscous flow}} + \\underbrace{\\frac{\\sigma_0}{G_2}\\!\\left(1-e^{-t/\\tau_2}\\right)}_{\\text{retarded elastic}}$$
       <p><strong>Recovery phase</strong> ($t > t_\\text{release}$):</p>
-      $$\\varepsilon(t) = \\frac{\\sigma_0 t_\\text{rel}}{\\eta_1} + \\frac{\\sigma_0}{E_2}\\!\\left(1-e^{-t_\\text{rel}/\\tau_2}\\right)e^{-(t-t_\\text{rel})/\\tau_2}$$
-      <p>where $\\tau_2 = \\eta_2/E_2$ is the retardation time. The transition window around $t_\\text{release}$ is pruned automatically to remove instrument oscillation artefacts. Use <em>Exclude time ranges</em> in the Parameters panel to remove additional non-equilibrium data (e.g. the initial loading ramp).</p>`,
+      $$\\varepsilon(t) = \\frac{\\sigma_0 t_\\text{rel}}{\\eta_1} + \\frac{\\sigma_0}{G_2}\\!\\left(1-e^{-t_\\text{rel}/\\tau_2}\\right)e^{-(t-t_\\text{rel})/\\tau_2}$$
+      <p>where $\\tau_2 = \\eta_2/G_2$ is the retardation time. The transition window around $t_\\text{release}$ is pruned automatically to remove instrument oscillation artefacts. Use <em>Exclude time ranges</em> in the Parameters panel to remove additional non-equilibrium data (e.g. the initial loading ramp).</p>`,
 
     'Recovery Components': `
       <p>Total deformation at $t = t_\\text{release}$ is partitioned into three fractions:</p>
-      $$f_\\text{elastic} = \\frac{\\sigma_0/E_1}{\\varepsilon_\\text{total}}, \\quad
-        f_\\text{viscoelastic} = \\frac{(\\sigma_0/E_2)(1-e^{-t_\\text{rel}/\\tau_2})}{\\varepsilon_\\text{total}}, \\quad
+      $$f_\\text{elastic} = \\frac{\\sigma_0/G_1}{\\varepsilon_\\text{total}}, \\quad
+        f_\\text{viscoelastic} = \\frac{(\\sigma_0/G_2)(1-e^{-t_\\text{rel}/\\tau_2})}{\\varepsilon_\\text{total}}, \\quad
         f_\\text{plastic} = \\frac{\\sigma_0 t_\\text{rel}/\\eta_1}{\\varepsilon_\\text{total}}$$
       <p>The <strong>elastic</strong> ($f_\\text{el}$) and <strong>viscoelastic</strong> ($f_\\text{ve}$) components are recovered after stress release; the <strong>plastic</strong> component ($f_\\text{pl}$) is permanent deformation. A purely elastic material gives $f_\\text{el}=1$; an ideal viscous fluid gives $f_\\text{pl}=1$.</p>`,
 
@@ -94,6 +94,7 @@ const state = {
   sheetTestTypes: {},      // { sheetName: "frequency_sweep" }
   lastResponse: null,
   hasRun: false,           // true after first successful analysis run
+  creepPreviewFig: null,   // saved rawplot figure for creep_recovery (persists across Run Analysis)
 };
 
 // Debounce timer for auto re-run after slider change
@@ -139,8 +140,10 @@ const cpXCol            = document.getElementById('cp-x-col');
 const cpYCols           = document.getElementById('cp-y-cols');
 const cpMode            = document.getElementById('cp-mode');
 const cpRunBtn          = document.getElementById('cp-run-btn');
-const descAccordion     = document.getElementById('desc-accordion');
-const descContent       = document.getElementById('desc-content');
+const descAccordion        = document.getElementById('desc-accordion');
+const descContent          = document.getElementById('desc-content');
+const inferredParamsCard   = document.getElementById('inferred-params-card');
+const inferredParamsBody   = document.getElementById('inferred-params-body');
 
 // ===== Upload / Drag-Drop =====
 dropZone.addEventListener('click', () => fileInput.click());
@@ -194,7 +197,12 @@ async function handleFile(f) {
     customPlotCard.classList.remove('d-none');
 
     hideLoading();
-    showPreviewState();
+    if (testTypeSelect.value === 'creep_recovery') {
+      showPreviewState();          // show data table immediately
+      autoRunCreepPreview();       // async: switches to plot section when ready
+    } else {
+      showPreviewState();
+    }
   } catch (e) {
     showError(e.message);
   }
@@ -334,7 +342,7 @@ function renderSheetList() {
           if (sheetCb) _setCheckedState(sheetCb, false, false);
         }
       });
-      _initSegmentSliders(); initCustomPlot();
+      _initSegmentSliders(); initCustomPlot(); renderInferredParams(); _updatePruneLabels();
       if (state.hasRun) scheduleRerun();
     });
 
@@ -354,7 +362,7 @@ function renderSheetList() {
           matDiv.querySelectorAll(`.iv-cb[data-sheet="${CSS.escape(name)}"]`).forEach(c => { c.checked = false; });
         }
         _updateMatCb(matCb, sheetNames);
-        _initSegmentSliders(); initCustomPlot();
+        _initSegmentSliders(); initCustomPlot(); renderInferredParams(); _updatePruneLabels();
         if (state.hasRun) scheduleRerun();
       });
     });
@@ -374,7 +382,7 @@ function renderSheetList() {
         const sheetCb = matDiv.querySelector(`.sheet-cb[value="${CSS.escape(name)}"]`);
         if (sheetCb) _updateSheetCb(sheetCb, name);
         _updateMatCb(matCb, sheetNames);
-        _initSegmentSliders();
+        _initSegmentSliders(); renderInferredParams(); _updatePruneLabels();
         if (state.hasRun) scheduleRerun();
       });
     });
@@ -532,13 +540,40 @@ function renderParams() {
           <span class="input-group-text text-muted" style="font-size:0.75rem;">blank = auto</span>
         </div>
       </div>
-      <div class="param-group mb-2">
-        <label>Transition prune window (s)
-          <i class="bi bi-info-circle text-muted ms-1" data-bs-toggle="tooltip"
-             title="Seconds of data removed around t_release to exclude the transient oscillation when stress is applied or removed. Typical value: 2–5 s."></i>
+
+      <div class="param-group mb-2 border-top pt-2">
+        <label class="fw-semibold d-block mb-2">
+          <i class="bi bi-scissors me-1"></i>Pruning
+          <small class="text-muted fw-normal ms-1">by data-point index</small>
         </label>
-        <input type="number" class="form-control form-control-sm" id="p-prune-win" value="2" min="0" step="0.5">
+
+        <div class="mb-3">
+          <label class="small mb-1 d-block">Zone 1 — Exclude initial points
+            <i class="bi bi-info-circle text-muted ms-1" data-bs-toggle="tooltip"
+               title="Number of data points to remove from the very start of the time series (initial loading transient). The label shows the time of the last excluded point in the reference sheet."></i>
+          </label>
+          <div class="d-flex align-items-center gap-2">
+            <input type="range" class="form-range flex-grow-1" id="p-prune-start-n"
+                   min="0" max="50" step="1" value="33">
+            <span id="p-prune-start-label" class="text-muted small text-nowrap"
+                  style="min-width:120px;font-variant-numeric:tabular-nums;"></span>
+          </div>
+        </div>
+
+        <div>
+          <label class="small mb-1 d-block">Zone 2 — Exclude points after t<sub>release</sub>
+            <i class="bi bi-info-circle text-muted ms-1" data-bs-toggle="tooltip"
+               title="Number of data points to remove right after stress release (oscillation artefact). The label shows the time of the last excluded point in the reference sheet."></i>
+          </label>
+          <div class="d-flex align-items-center gap-2">
+            <input type="range" class="form-range flex-grow-1" id="p-prune-release-n"
+                   min="0" max="150" step="1" value="65">
+            <span id="p-prune-release-label" class="text-muted small text-nowrap"
+                  style="min-width:120px;font-variant-numeric:tabular-nums;"></span>
+          </div>
+        </div>
       </div>
+
       <div class="param-group mb-2">
         <div class="form-check form-check-sm">
           <input class="form-check-input" type="checkbox" id="p-maxwell">
@@ -561,8 +596,7 @@ function renderParams() {
                title="Show all selected samples on the same axes for direct comparison, each in a distinct colour."></i>
           </label>
         </div>
-      </div>
-      ${fitWindowUI(tt)}`;
+      </div>`;
   } else if (tt === 'amplitude_sweep') {
     paramsBody.innerHTML = `
       <div class="param-group mb-2">
@@ -646,7 +680,13 @@ function renderParams() {
       </div>`;
   }
 
-  // Wire up fitting-window sliders if present
+  // Show/hide inferred parameters for creep_recovery
+  renderInferredParams();
+
+  // Init point-based prune sliders (creep_recovery only)
+  if (tt === 'creep_recovery') _initPruneSliders();
+
+  // Wire up fitting-window sliders if present (stress_relaxation)
   _attachSliderListeners();
 
   // Bootstrap tooltips on info icons
@@ -842,13 +882,13 @@ function collectParams() {
 
   if (tt === 'creep_recovery') {
     const tRelRaw = val('p-t-release');
-    p.t_release      = (tRelRaw && tRelRaw.trim() !== '') ? parseFloat(tRelRaw) : 'auto';
-    p.prune_window   = parseFloat(val('p-prune-win') || 2.0);
-    p.enable_maxwell    = chk('p-maxwell');
-    p.enable_kelvin     = chk('p-kelvin');
-    p.overlay           = chk('p-overlay');
-    p.combine_segments  = true;  // always combine creep + recovery into one time series
-    p.exclude_ranges    = collectFitWindow();
+    p.t_release       = (tRelRaw && tRelRaw.trim() !== '') ? parseFloat(tRelRaw) : 'auto';
+    p.prune_start_n   = parseInt(val('p-prune-start-n') || 0);
+    p.prune_release_n = parseInt(val('p-prune-release-n') || 0);
+    p.enable_maxwell  = chk('p-maxwell');
+    p.enable_kelvin   = chk('p-kelvin');
+    p.overlay         = chk('p-overlay');
+    p.combine_segments = true;
   } else if (tt === 'amplitude_sweep') {
     p.plateau_points = parseInt(val('p-plateau') || 5);
     p.deviation      = parseFloat(val('p-deviation') || 5) / 100;
@@ -885,24 +925,25 @@ function showPreviewState() {
   renderPreview(previewSheetSel.value);
 }
 
-function renderPreview(sheetName) {
+/** Build the data-table HTML for a given sheet (shared between preview state and tab). */
+function _buildPreviewHTML(sheetName) {
   const info = state.sheets[sheetName];
-  if (!info) return;
+  if (!info) return '';
 
   const cols       = info.columns || [];
   const units      = info.units   || {};
   const sampleData = info.sample_data || [];
   const ivCount    = info.n_intervals || 1;
 
-  // Column pills
   const colPills = cols.map(c => {
     const u = units[c] ? ` <span class="text-muted">(${escHtml(units[c])})</span>` : '';
     return `<span class="badge bg-light text-dark border me-1 mb-1 fw-normal">${escHtml(c)}${u}</span>`;
   }).join('');
 
-  // Data table
   const thCells  = cols.map(c => `<th class="text-nowrap small">${escHtml(c)}</th>`).join('');
-  const unitRow  = `<tr class="table-secondary">${cols.map(c => `<td class="text-muted small text-nowrap">${escHtml(units[c] || '—')}</td>`).join('')}</tr>`;
+  const unitRow  = `<tr class="table-secondary">${cols.map(c =>
+    `<td class="text-muted small text-nowrap">${escHtml(units[c] || '—')}</td>`
+  ).join('')}</tr>`;
   const dataRows = sampleData.map(row =>
     `<tr>${cols.map(c => {
       const v = row[c];
@@ -912,7 +953,7 @@ function renderPreview(sheetName) {
     }).join('')}</tr>`
   ).join('');
 
-  previewContent.innerHTML = `
+  return `
     <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
       <span class="badge ${testTypeBadge(info.test_type)} px-2 py-1">${escHtml(info.test_type.replace(/_/g,' '))}</span>
       <small class="text-muted">${info.n_rows} rows &middot; ${ivCount} segment(s) &middot; ${cols.length} columns</small>
@@ -928,8 +969,12 @@ function renderPreview(sheetName) {
       </table>
     </div>
     <p class="text-muted small mt-1">
-      <i class="bi bi-info-circle me-1"></i>First ${sampleData.length} rows shown (of ${info.n_rows} total in first segment).
+      <i class="bi bi-info-circle me-1"></i>${info.n_rows} row(s) · ${ivCount} segment(s).
     </p>`;
+}
+
+function renderPreview(sheetName) {
+  previewContent.innerHTML = _buildPreviewHTML(sheetName);
 }
 
 // ===== Custom Plot =====
@@ -1075,6 +1120,299 @@ function updateDescription(testType, figLabel) {
   if (window.MathJax) MathJax.typesetPromise([descContent]).catch(console.error);
 }
 
+// ===== Inferred parameters display (creep_recovery) =====
+// Reads from state.sheets (populated at parse time) — shown before the user runs analysis.
+function renderInferredParams() {
+  const tt = testTypeSelect.value;
+  if (tt !== 'creep_recovery') {
+    inferredParamsCard.classList.add('d-none');
+    return;
+  }
+
+  const rows = [];
+  for (const name of state.selectedSheets) {
+    const info = state.sheets[name];
+    if (!info || !info.inferred || Object.keys(info.inferred).length === 0) continue;
+    const { sigma0, t_release } = info.inferred;
+    rows.push({ sample: name, sigma0, t_release });
+  }
+
+  if (rows.length === 0) {
+    inferredParamsCard.classList.add('d-none');
+    return;
+  }
+
+  const tableRows = rows.map(r => {
+    const sigma0Str = r.sigma0    != null ? Number(r.sigma0).toPrecision(4)       : '—';
+    const tRelStr   = r.t_release != null ? Number(r.t_release).toFixed(1) + ' s' : '—';
+    return `<tr>
+      <td class="text-truncate" style="max-width:110px;" title="${escHtml(r.sample)}">${escHtml(r.sample)}</td>
+      <td>${escHtml(sigma0Str)}</td>
+      <td>${escHtml(tRelStr)}</td>
+    </tr>`;
+  }).join('');
+
+  inferredParamsBody.innerHTML = `
+    <table class="table table-sm table-borderless mb-0" style="font-size:0.78rem;">
+      <thead class="table-light">
+        <tr>
+          <th>Sample</th>
+          <th>σ₀ (Pa)</th>
+          <th>t<sub>release</sub></th>
+        </tr>
+      </thead>
+      <tbody>${tableRows}</tbody>
+    </table>
+    <p class="text-muted mb-0 mt-1" style="font-size:0.7rem;">
+      <i class="bi bi-info-circle me-1"></i>
+      σ₀ = median of first 10 Shear Stress points ·
+      t<sub>release</sub> inferred from strain peak
+    </p>`;
+
+  inferredParamsCard.classList.remove('d-none');
+}
+
+// ===== Point-based prune sliders (creep_recovery) =====
+
+/**
+ * Return { allTimes, afterTimes } for the first selected creep_recovery sheet.
+ * allTimes  : time values of all data points in the combined series
+ * afterTimes: time values of points strictly after the inferred t_release
+ */
+function _getPruneTimes() {
+  const firstName = [...state.selectedSheets].find(name => {
+    const info = state.sheets[name];
+    return info && info.inferred && Object.keys(info.inferred).length > 0;
+  }) || [...state.selectedSheets][0];
+
+  const info = firstName ? state.sheets[firstName] : null;
+  const data = info?.sample_data || [];
+  const t_release = info?.inferred?.t_release ?? null;
+
+  const allTimes = data
+    .map(r => r['Time'])
+    .filter(v => v != null && isFinite(parseFloat(v)))
+    .map(Number);
+
+  const afterTimes = t_release != null
+    ? allTimes.filter(t => t > t_release)
+    : [];
+
+  return { allTimes, afterTimes };
+}
+
+/** Format a slider position as "N pts (≤ X.X s)" using actual data-point times. */
+function _pruneLabel(n, times) {
+  if (n === 0) return '0 pts (none)';
+  const lastT = n <= times.length ? times[n - 1] : (times.length > 0 ? times[times.length - 1] : null);
+  const tStr = lastT != null ? ` (≤ ${lastT.toFixed(1)} s)` : '';
+  return `${n} pt${n !== 1 ? 's' : ''}${tStr}`;
+}
+
+/** Update the label spans next to the two prune sliders. */
+function _updatePruneLabels() {
+  const startEl   = document.getElementById('p-prune-start-n');
+  const releaseEl = document.getElementById('p-prune-release-n');
+  if (!startEl && !releaseEl) return;
+
+  const { allTimes, afterTimes } = _getPruneTimes();
+
+  if (startEl) {
+    const lbl = document.getElementById('p-prune-start-label');
+    if (lbl) lbl.textContent = _pruneLabel(parseInt(startEl.value), allTimes);
+  }
+  if (releaseEl) {
+    const lbl = document.getElementById('p-prune-release-label');
+    if (lbl) lbl.textContent = _pruneLabel(parseInt(releaseEl.value), afterTimes);
+  }
+}
+
+/** Wire event listeners on the two prune sliders (called from renderParams). */
+function _initPruneSliders() {
+  _updatePruneLabels();   // set initial labels
+
+  ['p-prune-start-n', 'p-prune-release-n'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      _updatePruneLabels();
+      updateCreepPreviewZones();   // live update shading on the preview plot
+      if (state.hasRun) scheduleRerun();
+    });
+  });
+}
+
+// ===== Creep preview plot: interactive zones =====
+
+/**
+ * Overlay red-shaded rectangles on the Time Series preview plot to show
+ * which data points will be excluded by the two prune sliders.
+ * Called on slider input and after the plot is first rendered.
+ */
+function updateCreepPreviewZones() {
+  const el = document.getElementById('plot-div-creep-ts');
+  if (!el?._fullLayout) return;
+
+  const startN   = parseInt(document.getElementById('p-prune-start-n')?.value  || 0);
+  const releaseN = parseInt(document.getElementById('p-prune-release-n')?.value || 0);
+
+  const { allTimes, afterTimes } = _getPruneTimes();
+  const shapes = [];
+
+  // Zone 1 — first startN data points
+  if (startN > 0 && allTimes.length > 0) {
+    const x0 = allTimes[0];
+    const x1 = allTimes[Math.min(startN, allTimes.length) - 1];
+    if (x1 >= x0) shapes.push({
+      type: 'rect', xref: 'x', yref: 'paper',
+      x0, x1, y0: 0, y1: 1,
+      fillcolor: 'rgba(220,53,69,0.18)',
+      line: { color: 'rgba(220,53,69,0.5)', width: 1 },
+      layer: 'below',
+      label: { text: 'Zone 1', textposition: 'top left', font: { color: 'rgba(220,53,69,0.9)', size: 11 } },
+    });
+  }
+
+  // Zone 2 — first releaseN data points after t_release
+  if (releaseN > 0 && afterTimes.length > 0) {
+    const x0 = afterTimes[0];
+    const x1 = afterTimes[Math.min(releaseN, afterTimes.length) - 1];
+    if (x1 >= x0) shapes.push({
+      type: 'rect', xref: 'x', yref: 'paper',
+      x0, x1, y0: 0, y1: 1,
+      fillcolor: 'rgba(220,53,69,0.18)',
+      line: { color: 'rgba(220,53,69,0.5)', width: 1 },
+      layer: 'below',
+      label: { text: 'Zone 2', textposition: 'top left', font: { color: 'rgba(220,53,69,0.9)', size: 11 } },
+    });
+  }
+
+  Plotly.relayout(el, { shapes });
+}
+
+// ===== Auto-generated Shear Strain vs Time preview (creep_recovery) =====
+
+/**
+ * Append the "Time Series" and "Data Table" preview tabs to plotTabs/plotTabContent.
+ * active=true  → Time Series tab is visible and its plot is rendered immediately.
+ * active=false → tabs are appended but not active; Time Series renders lazily on click.
+ */
+function _appendCreepPreviewTabs(active = false) {
+  if (!state.creepPreviewFig) return;
+
+  const sheetNames   = Object.keys(state.sheets);
+  const defaultSheet = sheetNames[0] || '';
+
+  // ── Time Series tab ──
+  const tsId  = 'tab-pane-creep-ts';
+  const tsLi  = document.createElement('li');
+  tsLi.className = 'nav-item';
+  tsLi.innerHTML = `<button class="nav-link${active ? ' active' : ''}" data-bs-toggle="tab"
+    data-bs-target="#${tsId}" type="button">
+    <i class="bi bi-graph-up me-1"></i>Time Series
+  </button>`;
+  plotTabs.appendChild(tsLi);
+
+  const tsPane = document.createElement('div');
+  tsPane.className = `tab-pane fade${active ? ' show active' : ''}`;
+  tsPane.id        = tsId;
+  tsPane.innerHTML = `<div class="plot-container" id="plot-div-creep-ts"></div>`;
+  plotTabContent.appendChild(tsPane);
+
+  const _renderTsPlot = () => {
+    const el = document.getElementById('plot-div-creep-ts');
+    if (!el || el.dataset.rendered) return;
+    el.dataset.rendered = '1';
+    const fig = JSON.parse(JSON.stringify(state.creepPreviewFig));
+    Plotly.newPlot(el, fig.data || [], fig.layout || {}, {
+      responsive: true, displayModeBar: true,
+    });
+    setTimeout(() => updateCreepPreviewZones(), 80);
+  };
+
+  if (active) {
+    // Render immediately
+    setTimeout(_renderTsPlot, 50);
+  }
+
+  tsLi.querySelector('button').addEventListener('shown.bs.tab', () => {
+    _renderTsPlot();
+    const el = document.getElementById('plot-div-creep-ts');
+    if (el) Plotly.Plots.resize(el);
+    updateCreepPreviewZones();
+  });
+
+  // ── Data Table tab ──
+  const tblId  = 'tab-pane-creep-tbl';
+  const tblLi  = document.createElement('li');
+  tblLi.className = 'nav-item';
+  tblLi.innerHTML = `<button class="nav-link" data-bs-toggle="tab"
+    data-bs-target="#${tblId}" type="button">
+    <i class="bi bi-table me-1"></i>Data Table
+  </button>`;
+  plotTabs.appendChild(tblLi);
+
+  const tblPane = document.createElement('div');
+  tblPane.className = 'tab-pane fade';
+  tblPane.id        = tblId;
+  tblPane.innerHTML = `
+    <div class="d-flex align-items-center gap-2 mb-2 mt-2">
+      <label class="small text-muted mb-0">Sheet:</label>
+      <select class="form-select form-select-sm" id="creep-tbl-sheet-sel"
+              style="width:auto;min-width:130px;">
+        ${sheetNames.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
+      </select>
+    </div>
+    <div id="creep-tbl-content"></div>`;
+  plotTabContent.appendChild(tblPane);
+
+  tblLi.querySelector('button').addEventListener('shown.bs.tab', () => {
+    const sel = document.getElementById('creep-tbl-sheet-sel');
+    document.getElementById('creep-tbl-content').innerHTML =
+      _buildPreviewHTML(sel?.value || defaultSheet);
+  });
+  tblPane.addEventListener('change', e => {
+    if (e.target.id === 'creep-tbl-sheet-sel') {
+      document.getElementById('creep-tbl-content').innerHTML =
+        _buildPreviewHTML(e.target.value);
+    }
+  });
+}
+
+async function autoRunCreepPreview() {
+  if (!state.file || state.selectedSheets.size === 0) return;
+  if (testTypeSelect.value !== 'creep_recovery') return;
+
+  const hasStrain = [...state.selectedSheets].some(name =>
+    state.sheets[name]?.columns?.includes('Shear Strain')
+  );
+  if (!hasStrain) return;
+
+  const fd = new FormData();
+  fd.append('file',                state.file);
+  fd.append('sheet_names',         JSON.stringify([...state.selectedSheets]));
+  fd.append('interval_selections', JSON.stringify(collectIntervalSelections()));
+  fd.append('x_col',  'Time');
+  fd.append('y_cols', JSON.stringify(['Shear Strain']));
+  fd.append('mode',   'lines+markers');
+
+  try {
+    const res = await fetch('/api/rawplot', { method: 'POST', body: fd });
+    if (!res.ok) return;
+    const rawData = await res.json();
+
+    state.creepPreviewFig = rawData.figure;   // persist for later re-use
+
+    plotTabs.innerHTML       = '';
+    plotTabContent.innerHTML = '';
+    _appendCreepPreviewTabs(true);            // Time Series tab is active
+    showPlotSection(true);
+
+  } catch (e) {
+    console.warn('Creep preview failed:', e);
+  }
+}
+
 // ===== Run analysis =====
 runBtn.addEventListener('click', runAnalysis);
 
@@ -1154,6 +1492,11 @@ function renderPlots(data) {
     plotTabContent.appendChild(pane);
   });
 
+  // Append creep preview tabs (Time Series + Data Table) after analysis tabs
+  if (data.test_type === 'creep_recovery' && state.creepPreviewFig) {
+    _appendCreepPreviewTabs(false);   // not active — lazy render on click
+  }
+
   showPlotSection(true);
   updateDescription(data.test_type, labels[0]);
 
@@ -1188,6 +1531,8 @@ function setAxisScale(axis, type) {
 
 function applyAxisScale(plotDiv) {
   if (!plotDiv?._fullLayout) return;
+  // Bar charts (e.g. Recovery Components) use fixed percentage axes — skip rescaling
+  if (plotDiv._fullLayout.barmode === 'stack') return;
   const update = {
     'xaxis.type': axisScale.x === 'log' ? 'log' : 'linear',
     'yaxis.type': axisScale.y === 'log' ? 'log' : 'linear',

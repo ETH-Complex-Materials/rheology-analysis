@@ -266,9 +266,9 @@ def get_units(df: pd.DataFrame) -> dict[str, str]:
             if pd.notna(val)}
 
 
-def get_interval_info(df: pd.DataFrame) -> list[dict]:
+def get_interval_info(df: pd.DataFrame, split_on_gaps: bool = True) -> list[dict]:
     """Return metadata for each interval (time range, n_rows, detected test type)."""
-    intervals = split_intervals(df)
+    intervals = split_intervals(df, split_on_gaps=split_on_gaps)
     result = []
     for i, iv in enumerate(intervals):
         if "Time" in iv.columns:
@@ -287,10 +287,14 @@ def get_interval_info(df: pd.DataFrame) -> list[dict]:
     return result
 
 
-def split_intervals(df: pd.DataFrame, time_col: str = "Time") -> list[pd.DataFrame]:
+def split_intervals(
+    df: pd.DataFrame,
+    time_col: str = "Time",
+    split_on_gaps: bool = True,
+) -> list[pd.DataFrame]:
     """
     Split a DataFrame into separate intervals when time resets (decreases)
-    OR when there is a large time gap between consecutive rows.
+    OR, optionally, when there is a large time gap between consecutive rows.
     Returns a list of DataFrames, one per interval.
     """
     if time_col not in df.columns:
@@ -304,7 +308,9 @@ def split_intervals(df: pd.DataFrame, time_col: str = "Time") -> list[pd.DataFra
     typical_dt = float(np.median(pos_diffs)) if len(pos_diffs) >= 5 else 1.0
     gap_threshold = max(15.0 * typical_dt, 20.0)
 
-    split_mask = (diffs < 0) | (diffs > gap_threshold)
+    split_mask = (diffs < 0)
+    if split_on_gaps:
+        split_mask = split_mask | (diffs > gap_threshold)
     split_points = [0] + list(np.where(split_mask)[0] + 1) + [len(t)]
 
     intervals = []

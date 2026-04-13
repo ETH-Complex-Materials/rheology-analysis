@@ -2,7 +2,7 @@
 
 Interactive web app for analysing rheometer data exported from **Anton Paar** and **TA Instruments** instruments. Upload an `.xlsx` file and get interactive Plotly charts and downloadable results — no Python installation required for end users.
 
-> **Authors:** Gabriel David (PhD, HHU Düsseldorf) · Rafael Libanori (ETH Zurich) · 2025
+> **Authors:** Gabriel David (PhD, HHU Düsseldorf) · Rafael Libanori (ETH Zurich) · 2026
 > **License:** MIT
 
 ---
@@ -26,7 +26,9 @@ Interactive web app for analysing rheometer data exported from **Anton Paar** an
 - Python 3.11 or newer
 - A virtual environment (recommended)
 
-### Install
+### venv install
+
+To install the application:
 
 ```bash
 cd rheology-webapp
@@ -35,7 +37,7 @@ source ../rheology-env/bin/activate      # macOS / Linux
 pip install -r requirements.txt
 ```
 
-### Run
+Then to run it:
 
 ```bash
 uvicorn app:app --port 2719
@@ -49,7 +51,7 @@ Open **http://localhost:2719** in any browser.
 VENV="../rheology-env-modern" && "$VENV/bin/uvicorn" app:app --port 2719
 ```
 
-### Docker
+### Docker install and run
 
 ```bash
 docker build -t rheology-app .
