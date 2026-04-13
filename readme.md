@@ -96,19 +96,34 @@ Always confirm this matches your experiment — the app does not force auto-dete
 
 | Parameter | Description |
 |-----------|-------------|
-| t_release (s) | Time at which stress is removed. Leave blank to auto-detect from the strain peak. |
-| Transition prune window (s) | Data removed around t_release to exclude the transient oscillation spike. Typical: 2–5 s. |
+| t_release (s) | Time at which stress is removed. Leave blank to auto-detect (global maximum of Shear Strain for t > 5 s). |
 | Include Maxwell model | Adds a 2-element Maxwell fit (single-exponential). |
 | Include Kelvin-Voigt model | Adds a Kelvin-Voigt fit (predicts full elastic recovery). |
 | Overlay all samples | Plots all replicates on the same axes. |
+| Combine segments | Merges multiple selected intervals (creep + recovery) into one continuous time series before fitting. |
 
-**Fitting window sliders** (Creep Recovery and Stress Relaxation):
+Inferred values displayed **before analysis**:
 
-- **Start prune** — drag right to exclude the first N seconds of a segment (remove loading artefacts).
-- **End prune** — drag left to exclude the last N seconds of a segment.
-- **Around t_release** — double-ended slider to exclude a window centred on the stress release (the orange spike). Appears automatically when both Creep and Recovery segments are selected.
+- **σ₀** — applied stress, inferred as the median of the first 10 positive Shear Stress values. Falls back to a `<value>Pa` pattern in the filename.
+- **t_release** — auto-detected as the time of the global Shear Strain maximum for t > 5 s.
 
-All slider changes auto-trigger a re-analysis after the first manual run.
+**Pruning sliders** (point-index based, generalise across experiments with different time steps):
+
+- **Zone 1 — Start prune (N pts)** — excludes the first N data points of the series (loading transient artefact). Range: 0 – 100 pts.
+- **Zone 2 — After t_release (N pts)** — excludes the first N data points after t_release (stress-release oscillation spike). Range: 0 – 150 pts.
+
+The **Shear Strain vs Time** preview plot is generated automatically when a Creep Recovery file is loaded, allowing you to validate σ₀ and t_release and set the pruning sliders before clicking Run Analysis.
+
+**Output tabs:**
+
+| Tab | Content |
+|-----|---------|
+| Creep/Recovery Fits | Shear Strain (absolute) vs Time with Burgers fit and optional Maxwell / Kelvin-Voigt overlays. R² scores in the plot title. |
+| Regression Parameters | Table of fitted G1, η1, G2, η2 (Pa / Pa·s) for all models and replicates. |
+| Recovery Components | Stacked bar chart partitioning total creep deformation into elastic, viscoelastic, and plastic fractions (%). |
+| Component Table | Mean ± std of each fraction across all replicates. |
+
+All parameter changes and slider adjustments auto-trigger a re-analysis after the first manual run.
 
 **Amplitude Sweep**
 
@@ -167,7 +182,7 @@ The app accepts standard rheometer exports (`.xlsx`):
 The parser automatically splits each sheet into segments when:
 
 - The time column **resets** (decreases) — standard between consecutive measurement intervals.
-- There is a **large time gap** (> 20 s or > 15× the typical time step) — used for creep/recovery data where creep ends at ~285 s and recovery resumes at ~330 s without a time reset.
+- There is a **large time gap** (> 20 s or > 15× the typical time step) — applies to most test types. **Creep Recovery data is intentionally kept as a single continuous segment** (no gap-based splitting) to avoid discarding data points around the creep → recovery transition.
 
 ---
 
