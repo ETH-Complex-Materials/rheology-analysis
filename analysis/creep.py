@@ -69,6 +69,29 @@ def _kelvin_creep(t_data, E, eta, sigma0, t_release):
     return strain
 
 
+def _zener_creep(t_data, G_perm, G_trans, eta_trans, sigma0, t_release):
+    """
+    Zener / Standard Linear Solid — parallel representation.
+    Permanent spring G_perm in parallel with a Maxwell branch (G_trans + eta_trans).
+    Recovery via Boltzmann superposition: apply −σ₀ at t_release.
+    """
+    G_perm    = max(G_perm,    1e-9)
+    G_trans   = max(G_trans,   1e-9)
+    eta_trans = max(eta_trans, 1e-9)
+    tau_ret = eta_trans * (G_perm + G_trans) / (G_perm * G_trans)
+
+    def J(t):
+        return 1.0 / G_perm - (1.0 / G_perm - 1.0 / (G_perm + G_trans)) * np.exp(-t / tau_ret)
+
+    strain = sigma0 * J(t_data)
+
+    idx_r = t_data > t_release
+    if idx_r.any():
+        strain[idx_r] -= sigma0 * J(t_data[idx_r] - t_release)
+
+    return strain
+
+
 def _r2(y_true, y_pred):
     ss_res = np.sum((y_true - y_pred)**2)
     ss_tot = np.sum((y_true - np.mean(y_true))**2)
@@ -145,6 +168,7 @@ def analyze_creep_recovery(
     drop_index=None,
     enable_maxwell: bool = False,
     enable_kelvin: bool = False,
+    enable_zener: bool = False,
     prune_window: float = 0.0,
     exclude_ranges: list | None = None,
     prune_start_n: int = 0,
@@ -302,6 +326,28 @@ def analyze_creep_recovery(
                 res["params_kelvin"] = {"Error": "Fit failed"}
                 res["fitted_data_kelvin"] = {"strain": None}
 
+        # Zener / SLS (optional)
+        if enable_zener:
+            def _z(t, G_perm, G_trans, eta_trans):
+                return _zener_creep(t, G_perm, G_trans, eta_trans, sigma0, t_rel)
+            try:
+                p, _ = curve_fit(_z, t, s, p0=[10000, 10000, 1e6],
+                                 bounds=(0, np.inf), maxfev=10000)
+                fit = _z(t, *p)
+                G_p, G_t, eta_t = p
+                tauZ = eta_t * (G_p + G_t) / (G_p * G_t)
+                res["params_zener"] = {
+                    "G_perm (Pa)":    G_p,
+                    "G_trans (Pa)":   G_t,
+                    "η_trans (Pa·s)": eta_t,
+                    "tauZ (s)":       tauZ,
+                    "R2 Score":       _r2(s, fit),
+                }
+                res["fitted_data_zener"] = {"strain": fit.tolist()}
+            except (RuntimeError, ValueError):
+                res["params_zener"] = {"Error": "Fit failed"}
+                res["fitted_data_zener"] = {"strain": None}
+
         results.append(res)
     return results
 
@@ -321,6 +367,7 @@ def build_creep_figures(
     units: dict,
     enable_maxwell: bool = False,
     enable_kelvin: bool = False,
+    enable_zener: bool = False,
     overlay: bool = False,
 ) -> tuple[dict, dict]:
     """
@@ -370,6 +417,12 @@ def build_creep_figures(
                                   visible=visible, line=dict(color=color if overlay else '#d62728',
                                                              dash='dot')))
 
+        if enable_zener and res.get("fitted_data_zener", {}).get("strain") is not None:
+            cur.append(go.Scatter(x=t, y=res["fitted_data_zener"]["strain"],
+                                  mode='lines', name='Zener', legendgroup=res["Sample"],
+                                  visible=visible, line=dict(color=color if overlay else '#9467bd',
+                                                             dash='dashdot')))
+
         all_traces.extend(cur)
         if i == 0:
             traces_per = len(cur)
@@ -389,6 +442,8 @@ def build_creep_figures(
                 r2_parts.append(f"Maxwell R²={res['params_maxwell']['R2 Score']:.3f}")
             if enable_kelvin and "params_kelvin" in res and "R2 Score" in res["params_kelvin"]:
                 r2_parts.append(f"KV R²={res['params_kelvin']['R2 Score']:.3f}")
+            if enable_zener and "params_zener" in res and "R2 Score" in res["params_zener"]:
+                r2_parts.append(f"Zener R²={res['params_zener']['R2 Score']:.3f}")
             r2_str = (" | " + " | ".join(r2_parts)) if r2_parts else ""
             buttons.append(dict(label=res["Sample"], method="update",
                                 args=[{"visible": vis},
@@ -407,6 +462,8 @@ def build_creep_figures(
                 r2_parts0.append(f"Maxwell R²={res0['params_maxwell']['R2 Score']:.3f}")
             if enable_kelvin and res0.get("params_kelvin", {}).get("R2 Score") is not None:
                 r2_parts0.append(f"KV R²={res0['params_kelvin']['R2 Score']:.3f}")
+            if enable_zener and res0.get("params_zener", {}).get("R2 Score") is not None:
+                r2_parts0.append(f"Zener R²={res0['params_zener']['R2 Score']:.3f}")
             title0 = f"<b>{res0['Sample']}</b>" + ((" | " + " | ".join(r2_parts0)) if r2_parts0 else "")
 
     if buttons:
@@ -425,7 +482,7 @@ def build_creep_figures(
     # --- parameters table ---
     params_rows = []
     for res in analysis_results:
-        for model_key in ["burgers", "maxwell", "kelvin"]:
+        for model_key in ["burgers", "maxwell", "kelvin", "zener"]:
             pk = f"params_{model_key}"
             if pk in res and "Error" not in res[pk]:
                 row = {"Sample": res["Sample"], "Model": model_key.capitalize()}
@@ -435,6 +492,7 @@ def build_creep_figures(
     df = pd.DataFrame(params_rows) if params_rows else pd.DataFrame()
 
     if not df.empty:
+        # Maxwell / KV use single-element "G (Pa)" / "η (Pa·s)" → merge into G1 / η1
         if "G (Pa)" in df.columns:
             if "G1 (Pa)" not in df.columns:
                 df["G1 (Pa)"] = np.nan
@@ -444,7 +502,9 @@ def build_creep_figures(
                 df["η1 (Pa·s)"] = np.nan
             df["η1 (Pa·s)"] = df["η1 (Pa·s)"].fillna(df["η (Pa·s)"])
 
-        cols = ['Sample', 'Model', 'R2 Score', 'G1 (Pa)', 'η1 (Pa·s)', 'G2 (Pa)', 'η2 (Pa·s)']
+        cols = ['Sample', 'Model', 'R2 Score',
+                'G1 (Pa)', 'η1 (Pa·s)', 'G2 (Pa)', 'η2 (Pa·s)',
+                'G_perm (Pa)', 'G_trans (Pa)', 'η_trans (Pa·s)', 'tauZ (s)']
         df = df.reindex(columns=cols)
 
         table_vals = []
@@ -453,6 +513,11 @@ def build_creep_figures(
                 table_vals.append(df[col].tolist())
             elif col == 'R2 Score':
                 table_vals.append([f'{v:.3f}' if pd.notna(v) else '-' for v in df[col]])
+            elif 'tau' in col:
+                table_vals.append([
+                    ('∞' if v == float('inf') else f'{v:.2f}') if pd.notna(v) else '-'
+                    for v in df[col]
+                ])
             else:
                 table_vals.append([f'{v:.2e}' if pd.notna(v) else '-' for v in df[col]])
 

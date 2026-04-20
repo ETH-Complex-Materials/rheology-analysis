@@ -234,16 +234,36 @@ def detect_test_type(df: pd.DataFrame) -> str:
     """
     cols = set(df.columns)
 
-    if "Temperature" in cols and "Storage Modulus" in cols:
-        return "temperature_sweep"
+    # Angular Frequency is unambiguous — must come first.
     if ("Angular Frequency" in cols or "Frequency" in cols) and "Storage Modulus" in cols:
         return "frequency_sweep"
+    # Amplitude sweep: Shear Strain is the swept variable.
+    # Check before temperature_sweep because amplitude-sweep files often carry a
+    # constant Temperature column that would otherwise trigger a false match.
     if "Storage Modulus" in cols and "Shear Strain" in cols:
         return "amplitude_sweep"
+    # Temperature sweep: Temperature must actually vary (not just be a constant setpoint).
+    if "Temperature" in cols and "Storage Modulus" in cols:
+        temp_vals = pd.to_numeric(df["Temperature"], errors="coerce").dropna()
+        if len(temp_vals) >= 3 and (temp_vals.max() - temp_vals.min()) > 2.0:
+            return "temperature_sweep"
     if "Creep Compliance" in cols:
         return "creep_recovery"
-    if "Shear Stress" in cols and "Time" in cols and "Shear Strain" not in cols:
-        return "stress_relaxation"
+    if "Shear Stress" in cols and "Time" in cols:
+        if "Shear Strain" not in cols:
+            return "stress_relaxation"
+        # Both Shear Stress and Shear Strain present: check whether strain is nearly constant.
+        # In stress relaxation the strain is the controlled variable (fixed), so its coefficient
+        # of variation should be very small after the initial loading transient.
+        # The first 20 points are skipped because the loading ramp can show large variations
+        # that would otherwise inflate the CV and mask a true stress-relaxation experiment.
+        strain_vals = pd.to_numeric(df["Shear Strain"], errors="coerce").dropna()
+        stable = strain_vals.iloc[20:] if len(strain_vals) > 20 else strain_vals
+        if len(stable) >= 3:
+            mean_abs = abs(float(stable.mean()))
+            cv = float(stable.std()) / mean_abs if mean_abs > 1e-12 else float("inf")
+            if cv < 0.05:
+                return "stress_relaxation"
     if "Shear Strain" in cols and "Time" in cols:
         return "creep_recovery"
     return "unknown"

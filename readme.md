@@ -11,11 +11,11 @@ Interactive web app for analysing rheometer data exported from **Anton Paar** an
 
 | Test | What is analysed |
 |------|-----------------|
-| Creep Recovery | Burgers (4-element), Maxwell, Kelvin-Voigt fits; elastic/viscoelastic/plastic fractions |
+| Creep Recovery | Burgers, Maxwell, Kelvin-Voigt, Zener (SLS) fits; elastic / viscoelastic / plastic fractions |
 | Amplitude Sweep | G' and G'' vs strain; LVER detection (configurable deviation threshold) |
-| Stress Relaxation | Burgers bi-exponential and Maxwell single-exponential fits |
-| Frequency Sweep | G', G'', |eta*|, tan(delta) vs frequency; power-law fit; gel-point detection |
-| Temperature Sweep | G', G'', tan(delta) vs temperature; gel-point (crossover) detection |
+| Stress Relaxation | Burgers, Maxwell, Kelvin-Voigt, Zener (SLS) fits; ε₀ auto-inferred from data |
+| Frequency Sweep | G', G'', \|η*\|, tan(δ) vs frequency; Cole-Cole plot |
+| Temperature Sweep | G', G'', tan(δ) vs temperature; gel-point (crossover) detection |
 
 ---
 
@@ -92,13 +92,14 @@ Always confirm this matches your experiment — the app does not force auto-dete
 
 ### 4 — Set parameters
 
-**Creep Recovery**
+#### Creep Recovery
 
 | Parameter | Description |
 |-----------|-------------|
 | t_release (s) | Time at which stress is removed. Leave blank to auto-detect (global maximum of Shear Strain for t > 5 s). |
 | Include Maxwell model | Adds a 2-element Maxwell fit (single-exponential). |
 | Include Kelvin-Voigt model | Adds a Kelvin-Voigt fit (predicts full elastic recovery). |
+| Include Zener model (SLS) | Adds a Standard Linear Solid fit (permanent spring ∥ Maxwell branch). Predicts complete recovery (no permanent deformation). 3 free parameters: G_perm, G_trans, η_trans. |
 | Overlay all samples | Plots all replicates on the same axes. |
 | Combine segments | Merges multiple selected intervals (creep + recovery) into one continuous time series before fitting. |
 
@@ -114,27 +115,62 @@ Inferred values displayed **before analysis**:
 
 The **Shear Strain vs Time** preview plot is generated automatically when a Creep Recovery file is loaded, allowing you to validate σ₀ and t_release and set the pruning sliders before clicking Run Analysis.
 
-**Output tabs (in order):**
+**Output tabs:**
 
 | Tab | Content |
 |-----|---------|
 | Data Table | Raw parsed data for the selected sheet(s). |
 | Time Series | Shear Strain vs Time preview (same as pre-analysis plot). |
-| Creep/Recovery Fits | Shear Strain (absolute) vs Time with Burgers fit and optional Maxwell / Kelvin-Voigt overlays. R² scores in the plot title. |
-| Regression Parameters | Table of fitted G1, η1, G2, η2 (Pa / Pa·s) for all models and replicates. |
+| Creep/Recovery Fits | Shear Strain (absolute) vs Time with Burgers fit and optional Maxwell / Kelvin-Voigt / Zener overlays. R² scores in the plot title. |
+| Regression Parameters | Table of fitted parameters (G1, η1, G2, η2, G_perm, G_trans, η_trans, tauZ) for all models and replicates. |
 | Recovery Components (Burgers) | Stacked bar chart + summary table (mean ± std) partitioning total creep deformation into elastic, viscoelastic, and plastic fractions (%) derived analytically from the Burgers fit. |
-| Recovery Components (by hand) | Per-sample interactive view: define two Shear Strain thresholds per replicate — **ε₁** (end of elastic recovery / start of viscoelastic recovery) and **ε₂** (permanent/plastic deformation) — and fractions are computed in real time. A comparison column shows the corresponding Burgers fractions side-by-side. |
+| Recovery Components (by hand) | Per-sample interactive view: define two Shear Strain thresholds per replicate — **ε₁** (end of elastic recovery) and **ε₂** (permanent deformation) — and fractions are computed in real time. A comparison column shows the corresponding Burgers fractions side-by-side. |
 
 All parameter changes and slider adjustments auto-trigger a re-analysis after the first manual run.
 
-**Amplitude Sweep**
+#### Amplitude Sweep
 
 | Parameter | Description |
 |-----------|-------------|
-| Plateau points (first N) | Number of low-strain points used to compute G'_0. |
-| Deviation threshold (%) | LVER ends when G' deviates from G'_0 by more than this value. Default: 5 %. |
+| Plateau points (first N) | Number of low-strain points used to compute G'₀. |
+| Deviation threshold (%) | LVER ends when G' deviates from G'₀ by more than this value. Default: 5 %. |
 
-**Frequency / Temperature Sweep** — toggle optional plots (tan delta, |eta*|, Cole-Cole).
+**Output tabs:** Data Table · Amplitude Sweep (G', G'' vs strain, log/log) · LVER Results.
+
+#### Stress Relaxation
+
+| Parameter | Description |
+|-----------|-------------|
+| Applied strain ε₀ | Imposed strain (absolute, dimensionless). Inferred from the modal value of the Shear Strain column ÷ 100. Override if the inferred value is incorrect. |
+| Include Maxwell model | Single-exponential decay: σ(t) = G ε₀ exp(−t/τ). |
+| Include Kelvin-Voigt model | Constant-stress prediction under strain control (elastic-only baseline). |
+| Include Zener model (SLS) | σ(t) = ε₀ [G_perm + G_trans · exp(−t/τ_Z)]. Relaxes to a finite equilibrium plateau. 3 free parameters: G_perm, G_trans, η_trans. |
+| Overlay all samples | Plots all replicates on the same axes. |
+
+Inferred value displayed **before analysis**: **ε₀** — modal value of Shear Strain ÷ 100.
+
+**Start prune slider** — discrete positions correspond to the first 100 actual Time values in the file, allowing precise exclusion of the initial loading ramp.
+
+**Output tabs (in order):**
+
+| Tab | Content |
+|-----|---------|
+| Data Table | Raw parsed data for the selected sheet(s). |
+| Relaxation Plot | Shear Stress vs Time preview with shaded pruned region. |
+| Stress Relaxation Fits | Shear Stress vs Time with Burgers fit and optional Maxwell / Kelvin-Voigt / Zener overlays. R² scores in the plot title. |
+| Regression Parameters | Table of fitted parameters (G1, η1, G2, η2, tau1, tau2, G_perm, G_trans, η_trans, tauZ) for all models and replicates. |
+
+#### Frequency Sweep
+
+Toggle optional plots: tan(δ), |η*|, Cole-Cole.
+
+**Output tabs:** G' and G'' · tan(δ) · |η*| · Cole-Cole (depending on selected options).
+
+#### Temperature Sweep
+
+Toggle optional plot: tan(δ).
+
+**Output tabs:** G', G'', tan(δ) vs Temperature · optional tan(δ) panel.
 
 ### 5 — Run analysis
 
@@ -195,7 +231,7 @@ rheology-webapp/
 ├── app.py                  # FastAPI app (all HTTP endpoints)
 ├── analysis/
 │   ├── parser.py           # Excel parser; interval/gap detection
-│   ├── creep.py            # Burgers / Maxwell / Kelvin-Voigt fitting
+│   ├── creep.py            # Burgers / Maxwell / Kelvin-Voigt / Zener fitting
 │   ├── amplitude.py        # LVER detection
 │   ├── relaxation.py       # Stress relaxation fitting
 │   ├── frequency.py        # Frequency sweep analysis
