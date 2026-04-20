@@ -4,6 +4,7 @@ FastAPI backend for the Rheology Analysis Web App.
 import io
 import json
 import math
+import zipfile
 from collections import defaultdict
 from typing import Annotated
 
@@ -17,7 +18,8 @@ from analysis.parser import (detect_test_type, extract_sheet_data, get_data_df,
                               get_interval_info, get_units, split_intervals)
 from analysis.amplitude import analyze_lver, build_amplitude_figures
 from analysis.creep import (analyze_creep_recovery, build_creep_figures,
-                             build_recovery_component_figures, evaluate_recovery_components)
+                             build_recovery_component_figures, evaluate_recovery_components,
+                             infer_sigma0, infer_t_release)
 from analysis.frequency import analyze_frequency_sweep, build_frequency_figures
 from analysis.relaxation import analyze_stress_relaxation, build_relaxation_figures
 from analysis.temperature import analyze_temperature_sweep, build_temperature_figures
@@ -87,17 +89,41 @@ def _extract_raw_series(test_type: str, dataframes_list: list, units: dict) -> l
     return series
 
 
-def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tuple[list, list]:
+def _burgers_fracs(params: dict, t_rel: float) -> dict | None:
+    """Compute elastic/viscoelastic/plastic fractions from fitted Burgers params."""
+    try:
+        G1   = max(float(params.get("G1 (Pa)",   0)), 1e-9)
+        eta1 = max(float(params.get("η1 (Pa·s)", 0)), 1e-9)
+        G2   = max(float(params.get("G2 (Pa)",   0)), 1e-9)
+        eta2 = max(float(params.get("η2 (Pa·s)", 0)), 1e-9)
+        tau2 = eta2 / G2
+        eps_el = 1.0 / G1
+        eps_pl = t_rel / eta1
+        eps_vi = (1.0 / G2) * (1.0 - math.exp(-t_rel / tau2))
+        total  = eps_el + eps_pl + eps_vi
+        if total <= 0 or not math.isfinite(total):
+            return None
+        return {
+            "elastic":      round(100 * eps_el / total, 2),
+            "viscoelastic": round(100 * eps_vi / total, 2),
+            "plastic":      round(100 * eps_pl / total, 2),
+        }
+    except Exception:
+        return None
+
+
+def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tuple:
     """
-    Run analysis for a given test_type and return (figures, labels).
+    Run analysis for a given test_type and return (figures, labels, extra).
     p contains analysis parameters (may be empty — defaults are applied per type).
+    extra is a dict of additional data included in the API response (e.g. creep_samples).
     """
     if test_type == "creep_recovery":
         t_release_raw = p.get("t_release", "auto")
         t_release  = None if t_release_raw == "auto" else float(t_release_raw)
         en_maxwell = bool(p.get("enable_maxwell", False))
         en_kelvin  = bool(p.get("enable_kelvin", False))
-        prune_win  = float(p.get("prune_window", 2.0))
+        prune_win  = float(p.get("prune_window", 0.0))
 
         results = analyze_creep_recovery(
             dataframes_list, t_release,
@@ -106,15 +132,71 @@ def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tu
             enable_kelvin=en_kelvin,
             prune_window=prune_win,
             exclude_ranges=p.get("exclude_ranges", []),
+            prune_start_n=int(p.get("prune_start_n", 0)),
+            prune_release_n=int(p.get("prune_release_n", 0)),
         )
         overlay = bool(p.get("overlay", False))
         multi, table = build_creep_figures(results, units, en_maxwell, en_kelvin, overlay=overlay)
         components = evaluate_recovery_components(results)
-        comp_bar, comp_table = build_recovery_component_figures(components)
+        comp_fig = build_recovery_component_figures(components)
+
+        # Build per-sample data for the "by hand" recovery components tab.
+        # Uses raw (unpruned) dataframes so the full recovery curve is visible.
+        res_by_name = {r["Sample"]: r for r in results}
+        creep_samples = []
+        for sample_name, df in dataframes_list:
+            sname = str(sample_name)
+            res = res_by_name.get(sname)
+            if res is None:
+                continue
+            t_rel = float(res.get("t_release", 0))
+
+            t_ser = pd.to_numeric(df["Time"],        errors="coerce")
+            s_ser = pd.to_numeric(df["Shear Strain"], errors="coerce") / 100.0
+            valid = t_ser.notna() & s_ser.notna()
+            t_arr = t_ser[valid].tolist()
+            s_arr = s_ser[valid].tolist()
+            if not t_arr:
+                continue
+
+            # ε_total = max strain during the creep phase
+            creep_s = [s for t, s in zip(t_arr, s_arr) if t <= t_rel]
+            eps_total = max(creep_s) if creep_s else (max(s_arr) if s_arr else 0.0)
+
+            # Default ε₂ = last data point (asymptotic permanent deformation)
+            eps2_def = float(s_arr[-1])
+
+            # Default ε₁ = strain 10 % into recovery duration, else midpoint
+            t_max     = float(t_arr[-1])
+            t_eps1    = t_rel + 0.10 * (t_max - t_rel)
+            after_idx = [s for t, s in zip(t_arr, s_arr) if t >= t_eps1]
+            eps1_def  = float(after_idx[0]) if after_idx else (eps_total + eps2_def) / 2.0
+
+            # Clamp defaults to physical bounds
+            eps2_def = max(0.0, eps2_def)
+            eps1_def = max(eps2_def, min(eps1_def, eps_total))
+
+            # Burgers fractions (for the comparison column in the by-hand table)
+            bp = res.get("params_burgers", {})
+            bf = _burgers_fracs(bp, t_rel) if "G1 (Pa)" in bp else None
+
+            creep_samples.append({
+                "sample":       sname,
+                "t_release":    t_rel,
+                "t_max":        t_max,
+                "eps_total":    round(eps_total, 6),
+                "eps1_default": round(eps1_def,  6),
+                "eps2_default": round(eps2_def,  6),
+                "t":            t_arr,
+                "strain":       s_arr,
+                "burgers_fracs": bf,
+            })
+
         return (
-            [multi, table, comp_bar, comp_table],
+            [multi, table, comp_fig],
             ["Creep/Recovery Fits", "Regression Parameters",
-             "Recovery Components", "Component Table"],
+             "Recovery Components (Burgers)"],
+            {"creep_samples": creep_samples},
         )
 
     elif test_type == "amplitude_sweep":
@@ -122,7 +204,7 @@ def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tu
         deviation   = float(p.get("deviation", 0.05))
         lver_results = analyze_lver(dataframes_list, plateau_pts, deviation)
         sweep_fig, lver_tbl = build_amplitude_figures(dataframes_list, units, lver_results)
-        return [sweep_fig, lver_tbl], ["Amplitude Sweep", "LVER Results"]
+        return [sweep_fig, lver_tbl], ["Amplitude Sweep", "LVER Results"], {}
 
     elif test_type == "stress_relaxation":
         en_maxwell = bool(p.get("enable_maxwell", False))
@@ -136,7 +218,7 @@ def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tu
         )
         overlay = bool(p.get("overlay", False))
         multi, table = build_relaxation_figures(results, units, en_maxwell, en_kelvin, overlay=overlay)
-        return [multi, table], ["Stress Relaxation Fits", "Regression Parameters"]
+        return [multi, table], ["Stress Relaxation Fits", "Regression Parameters"], {}
 
     elif test_type == "frequency_sweep":
         show_tan = bool(p.get("show_tan_delta", True))
@@ -148,7 +230,7 @@ def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tu
         if show_tan: labels.append("tan(δ)")
         if show_eta: labels.append("|η*|")
         if show_cc:  labels.append("Cole-Cole")
-        return figs, labels
+        return figs, labels, {}
 
     elif test_type == "temperature_sweep":
         show_tan = bool(p.get("show_tan_delta", True))
@@ -156,7 +238,7 @@ def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tu
         figs     = build_temperature_figures(results, units, show_tan)
         labels   = ["G\' and G\'\'"]
         if show_tan: labels.append("tan(δ)")
-        return figs, labels
+        return figs, labels, {}
 
     else:
         raise HTTPException(status_code=400, detail=f"Unknown test_type: {test_type}")
@@ -207,7 +289,9 @@ def _build_items(sheets, selected_names, iv_sel, stt_overrides, combine: bool = 
             raise HTTPException(status_code=404, detail=f"Sheet '{name}' not found.")
         df = sheets[name]
         data_df = get_data_df(df)
-        intervals = split_intervals(data_df)
+        eff_tt = stt_overrides.get(name) or detect_test_type(data_df)
+        split_on_gaps = eff_tt != "creep_recovery"
+        intervals = split_intervals(data_df, split_on_gaps=split_on_gaps)
 
         # Apply interval selection
         sel = iv_sel.get(name)
@@ -217,7 +301,6 @@ def _build_items(sheets, selected_names, iv_sel, stt_overrides, combine: bool = 
             intervals = [data_df]
 
         units.update(get_units(df))
-        eff_tt = stt_overrides.get(name) or detect_test_type(data_df)
 
         if combine and len(intervals) > 1:
             combined = _combine_intervals(intervals)
@@ -265,19 +348,30 @@ async def parse_file(file: UploadFile = File(...)):
     result = {}
     for name, df in sheets.items():
         data_df = get_data_df(df)
-        ivs = split_intervals(data_df)
-        first_iv = ivs[0] if ivs else data_df
-        sample = (first_iv.head(20)
-                  .where(pd.notna(first_iv.head(20)), None)
-                  .to_dict('records'))
+        tt = detect_test_type(data_df)
+        split_on_gaps = tt != "creep_recovery"
+        ivs = split_intervals(data_df, split_on_gaps=split_on_gaps)
+        full_data = pd.concat(ivs, ignore_index=True) if ivs else data_df
+        sample = full_data.where(pd.notna(full_data), None).to_dict('records')
+
+        inferred: dict = {}
+        if tt == "creep_recovery":
+            s0  = infer_sigma0(full_data)
+            t_r = infer_t_release(full_data)
+            inferred = {
+                "sigma0":    s0,
+                "t_release": t_r,
+            }
+
         result[name] = {
             "columns":     list(df.columns),
-            "n_rows":      len(data_df),
+            "n_rows":      len(full_data),
             "n_intervals": len(ivs),
-            "intervals":   get_interval_info(data_df),
-            "test_type":   detect_test_type(data_df),
+            "intervals":   get_interval_info(data_df, split_on_gaps=split_on_gaps),
+            "test_type":   tt,
             "units":       get_units(df),
             "sample_data": sample,
+            "inferred":    inferred,
         }
 
     return _jsonify({"sheets": result, "file_size_kb": round(len(raw)/1024, 1)})
@@ -322,7 +416,7 @@ async def analyze(
             for tt, group_list in groups.items():
                 if tt == "unknown":
                     continue
-                figs, labels = _dispatch(tt, group_list, {}, units)
+                figs, labels, _ = _dispatch(tt, group_list, {}, units)
                 prefix = tt.replace("_", " ").title()
                 all_figures.extend(figs)
                 all_labels.extend([f"{prefix} — {l}" for l in labels])
@@ -335,12 +429,13 @@ async def analyze(
 
         else:
             dataframes_list = [(n, df) for n, df, _ in items]
-            figs, labels = _dispatch(test_type, dataframes_list, p, units)
+            figs, labels, extra = _dispatch(test_type, dataframes_list, p, units)
             raw_series = None
             if test_type in ('creep_recovery', 'stress_relaxation'):
                 raw_series = _extract_raw_series(test_type, dataframes_list, units)
             return _jsonify({"test_type": test_type, "figures": figs,
-                             "figure_labels": labels, "raw_series": raw_series})
+                             "figure_labels": labels, "raw_series": raw_series,
+                             **extra})
 
     except HTTPException:
         raise
@@ -357,9 +452,10 @@ async def download_results(
     download_format: str = Form(default="excel"),
     interval_selections: str = Form(default="{}"),
     sheet_test_types: str = Form(default="{}"),
+    by_hand_thresholds: str = Form(default="{}"),
 ):
     """
-    Run analysis and return results as a downloadable Excel or CSV file.
+    Run analysis and return results as a downloadable Excel or CSV archive.
     """
     raw = await file.read()
     try:
@@ -382,6 +478,7 @@ async def download_results(
         eff_tt = test_type
 
     dataframes_list = [(n, df) for n, df, _ in items]
+    bh = json.loads(by_hand_thresholds)
 
     result_dfs: dict[str, pd.DataFrame] = {}
 
@@ -393,20 +490,90 @@ async def download_results(
             drop_index=p.get("drop_index", []),
             enable_maxwell=bool(p.get("enable_maxwell", False)),
             enable_kelvin=bool(p.get("enable_kelvin", False)),
+            prune_start_n=int(p.get("prune_start_n", 0)),
+            prune_release_n=int(p.get("prune_release_n", 0)),
         )
+
+        # ── Sheet 1: Fitted Parameters ──────────────────────────────────────
         rows = []
         for res in results:
-            row = {"Sample": res["Sample"]}
-            for model in ["burgers", "maxwell", "kelvin"]:
-                pk = f"params_{model}"
-                if pk in res and "Error" not in res[pk]:
-                    for k, v in res[pk].items():
-                        row[f"{model}_{k}"] = v
+            row: dict = {
+                "Sample":        res["Sample"],
+                "σ₀ (Pa)":       round(float(res.get("sigma0") or 0), 4),
+                "t_release (s)": round(float(res.get("t_release") or 0), 3),
+            }
+            bp = res.get("params_burgers", {})
+            if bp and "Error" not in bp:
+                row["G1 (Pa)"]      = round(float(bp.get("G1 (Pa)",   float("nan"))), 4)
+                row["η1 (Pa·s)"]    = round(float(bp.get("η1 (Pa·s)", float("nan"))), 4)
+                row["G2 (Pa)"]      = round(float(bp.get("G2 (Pa)",   float("nan"))), 4)
+                row["η2 (Pa·s)"]    = round(float(bp.get("η2 (Pa·s)", float("nan"))), 4)
+                row["R² (Burgers)"] = round(float(bp.get("R2 Score",  float("nan"))), 4)
+            mp = res.get("params_maxwell", {})
+            if mp and "Error" not in mp:
+                row["G_Maxwell (Pa)"]   = round(float(mp.get("G (Pa)",   float("nan"))), 4)
+                row["η_Maxwell (Pa·s)"] = round(float(mp.get("η (Pa·s)", float("nan"))), 4)
+                row["R² (Maxwell)"]     = round(float(mp.get("R2 Score", float("nan"))), 4)
+            kp = res.get("params_kelvin", {})
+            if kp and "Error" not in kp:
+                row["G_KV (Pa)"]   = round(float(kp.get("G (Pa)",   float("nan"))), 4)
+                row["η_KV (Pa·s)"] = round(float(kp.get("η (Pa·s)", float("nan"))), 4)
+                row["R² (KV)"]     = round(float(kp.get("R2 Score", float("nan"))), 4)
             rows.append(row)
-        result_dfs["Creep_Recovery"] = pd.DataFrame(rows)
+        result_dfs["Fitted_Parameters"] = pd.DataFrame(rows)
+
+        # ── Sheet 2: Recovery Components (Burgers) ───────────────────────────
         components = evaluate_recovery_components(results, t_release)
         if components:
-            result_dfs["Recovery_Components"] = pd.DataFrame(components)
+            num_cols = ["Elastic (%)", "Viscoelastic (%)", "Plastic (%)"]
+            df_comp = (pd.DataFrame(components)
+                         [["Sample", "frac_elastic", "frac_visco", "frac_plastic"]]
+                         .copy()
+                         .rename(columns={"frac_elastic": "Elastic (%)",
+                                          "frac_visco":   "Viscoelastic (%)",
+                                          "frac_plastic": "Plastic (%)"}))
+            means_c = df_comp[num_cols].mean().round(2)
+            stds_c  = df_comp[num_cols].std(ddof=0).fillna(0).round(2)
+            df_comp = pd.concat([df_comp,
+                                  pd.DataFrame([{"Sample": "Mean",    **means_c}]),
+                                  pd.DataFrame([{"Sample": "Std Dev", **stds_c}])],
+                                 ignore_index=True)
+            result_dfs["Recovery_Components_Burgers"] = df_comp
+
+        # ── Sheet 3: Recovery Components (by hand) ───────────────────────────
+        if bh:
+            bh_rows = []
+            for sample_name, _ in dataframes_list:
+                sname = str(sample_name)
+                th = bh.get(sname)
+                if not th:
+                    continue
+                eps1      = float(th.get("eps1",      0))
+                eps2      = float(th.get("eps2",      0))
+                eps_total = float(th.get("eps_total", 0))
+                if eps_total <= 0:
+                    continue
+                eps2 = max(0.0, min(eps2, eps_total))
+                eps1 = max(eps2,  min(eps1, eps_total))
+                bh_rows.append({
+                    "Sample":           sname,
+                    "ε₁":               round(eps1,      6),
+                    "ε₂":               round(eps2,      6),
+                    "ε_total":          round(eps_total, 6),
+                    "Elastic (%)":      round(100 * (eps_total - eps1) / eps_total, 2),
+                    "Viscoelastic (%)": round(100 * (eps1 - eps2)      / eps_total, 2),
+                    "Plastic (%)":      round(100 *  eps2               / eps_total, 2),
+                })
+            if bh_rows:
+                num_cols = ["Elastic (%)", "Viscoelastic (%)", "Plastic (%)"]
+                df_bh    = pd.DataFrame(bh_rows)
+                means_bh = df_bh[num_cols].mean().round(2)
+                stds_bh  = df_bh[num_cols].std(ddof=0).fillna(0).round(2)
+                df_bh = pd.concat([df_bh,
+                                    pd.DataFrame([{"Sample": "Mean",    **means_bh}]),
+                                    pd.DataFrame([{"Sample": "Std Dev", **stds_bh}])],
+                                   ignore_index=True)
+                result_dfs["Recovery_Components_ByHand"] = df_bh
 
     elif eff_tt == "amplitude_sweep":
         lver = analyze_lver(dataframes_list,
@@ -450,15 +617,28 @@ async def download_results(
         raise HTTPException(status_code=422, detail="No results to download.")
 
     if download_format == "csv":
-        first_df = next(iter(result_dfs.values()))
-        buf = io.StringIO()
-        first_df.to_csv(buf, index=False)
-        buf.seek(0)
-        return StreamingResponse(
-            iter([buf.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={eff_tt}_results.csv"},
-        )
+        if len(result_dfs) == 1:
+            buf = io.StringIO()
+            next(iter(result_dfs.values())).to_csv(buf, index=False)
+            buf.seek(0)
+            return StreamingResponse(
+                iter([buf.getvalue()]),
+                media_type="text/csv",
+                headers={"Content-Disposition": f"attachment; filename={eff_tt}_results.csv"},
+            )
+        else:
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for name, df in result_dfs.items():
+                    csv_io = io.StringIO()
+                    df.to_csv(csv_io, index=False)
+                    zf.writestr(f"{name}.csv", csv_io.getvalue())
+            zip_buf.seek(0)
+            return StreamingResponse(
+                iter([zip_buf.read()]),
+                media_type="application/zip",
+                headers={"Content-Disposition": f"attachment; filename={eff_tt}_results.zip"},
+            )
     else:
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -511,7 +691,8 @@ async def raw_plot(
             continue
         df      = sheets[name]
         data_df = get_data_df(df)
-        intervals = split_intervals(data_df)
+        tt = detect_test_type(data_df)
+        intervals = split_intervals(data_df, split_on_gaps=(tt != "creep_recovery"))
         all_units.update(get_units(df))
 
         sel = iv_sel.get(name)
