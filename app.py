@@ -55,6 +55,51 @@ def _jsonify(obj):
     return _sanitize(obj)
 
 
+def _short_sample_name(full_name: str) -> str:
+    """Extract relative name from Project:::Test (Type) format."""
+    name_str = str(full_name)
+    if ":::" in name_str:
+        p = name_str.split(":::")[-1]
+        if "(" in p:
+            p = p.split("(")[0].strip()
+        return p
+    return name_str
+
+def _build_blocked_export_df(results, test_type):
+    """Build a non-tabular DataFrame with blocks per sample for easier reading."""
+    rows = []
+    y_label = "Strain (%)" if test_type == "creep_recovery" else "Stress (Pa)"
+    y_key = "strain" if test_type == "creep_recovery" else "stress"
+    
+    models = [("Burgers Fit", "fitted_data_burgers"), 
+              ("Maxwell Fit", "fitted_data_maxwell"), 
+              ("Kelvin-Voigt Fit", "fitted_data_kelvin")]
+    
+    for res in results:
+        rows.append(["Sample", _short_sample_name(res["Sample"])])
+        rows.append([]) # empty
+        
+        headers = ["Time (s)", f"Experimental {y_label}"]
+        active_keys = []
+        for label, m_key in models:
+            if res.get(m_key, {}).get(y_key) is not None:
+                headers.append(f"{label} ({y_label})")
+                active_keys.append(m_key)
+        rows.append(headers)
+        
+        t = res["experimental_data"]["t"]
+        y = res["experimental_data"][y_key]
+        for i in range(len(t)):
+            data_row = [t[i], y[i]]
+            for k in active_keys:
+                data_row.append(res[k][y_key][i])
+            rows.append(data_row)
+        
+        rows.append([]) # spacer
+        rows.append([]) # spacer
+        
+    return pd.DataFrame(rows)
+
 # ---------------------------------------------------------------------------
 # Analysis dispatch helper
 # ---------------------------------------------------------------------------
@@ -81,7 +126,7 @@ def _extract_raw_series(test_type: str, dataframes_list: list, units: dict) -> l
             continue
         y_unit = units.get(y_col_name, '')
         series.append({
-            'name':    name,
+            'name':    _short_sample_name(name),
             't':       t_vals,
             'y':       y_vals,
             'y_label': f"{y_col_name} ({y_unit})" if y_unit else y_col_name,
@@ -246,30 +291,29 @@ def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tu
 
 def _combine_intervals(intervals: list) -> "pd.DataFrame":
     """
-    Stack DataFrames (from consecutive intervals) with continuous time.
-    - If a segment's time starts near zero (reset split), offset it by the
-      cumulative time so far.
-    - If a segment's time is already large (gap split — times are absolute),
-      keep the times as-is; just advance the offset tracker.
+    Stack DataFrames (from consecutive intervals) into a single continuous time series.
+    Normalizes the starting time of the first segment to 0.0, and ensures
+    subsequent segments continue from the end of the previous one.
     """
     dfs = []
-    time_offset = 0.0
+    cumulative_time = 0.0
     for iv in intervals:
         df_c = iv.copy()
         if 'Time' in df_c.columns:
-            t = pd.to_numeric(df_c['Time'], errors='coerce')
-            t_valid = t.dropna()
+            t_raw = pd.to_numeric(df_c['Time'], errors='coerce')
+            t_valid = t_raw.dropna()
             if t_valid.empty:
                 dfs.append(df_c)
                 continue
-            t_first = float(t_valid.iloc[0])
-            if t_first > time_offset + 1.0:
-                # Gap split: times are already absolute, no offset needed
-                time_offset = float(t_valid.max())
-            else:
-                # Reset split: add cumulative offset
-                df_c['Time'] = t + time_offset
-                time_offset += float(t_valid.max())
+            
+            t_start = float(t_valid.iloc[0])
+            t_max   = float(t_valid.max())
+            t_dur   = t_max - t_start
+            
+            # Normalize this segment to start at current cumulative offset
+            df_c['Time'] = (t_raw - t_start) + cumulative_time
+            cumulative_time += max(0, t_dur)
+            
         dfs.append(df_c)
     return pd.concat(dfs, ignore_index=True)
 
@@ -329,12 +373,14 @@ async def parse_file(file: UploadFile = File(...)):
     """
     Upload an Excel file and return sheet names + detected test type per sheet.
     """
-    if not file.filename.lower().endswith(".xlsx"):
-        raise HTTPException(status_code=400, detail="Only .xlsx files are supported.")
+    # Support both .xlsx and .csv
+    ext = file.filename.lower()
+    if not (ext.endswith(".xlsx") or ext.endswith(".csv")):
+        raise HTTPException(status_code=400, detail="Only .xlsx and .csv files are supported.")
 
     raw = await file.read()
     try:
-        sheets = extract_sheet_data(raw)
+        sheets = extract_sheet_data(raw, filename=file.filename)
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Failed to parse file: {e}")
 
@@ -392,7 +438,7 @@ async def analyze(
     """
     raw = await file.read()
     try:
-        sheets = extract_sheet_data(raw)
+        sheets = extract_sheet_data(raw, filename=file.filename)
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Parse error: {e}")
 
@@ -575,6 +621,9 @@ async def download_results(
                                    ignore_index=True)
                 result_dfs["Recovery_Components_ByHand"] = df_bh
 
+        # ── Sheet 4: Fitted Time Series Data (Blocked) ─────────────────────
+        result_dfs["Fitted_Data_Points"] = _build_blocked_export_df(results, "creep_recovery")
+
     elif eff_tt == "amplitude_sweep":
         lver = analyze_lver(dataframes_list,
                              int(p.get("plateau_points", 5)),
@@ -598,6 +647,9 @@ async def download_results(
                         row[f"{model}_{k}"] = v
             rows.append(row)
         result_dfs["Stress_Relaxation"] = pd.DataFrame(rows)
+
+        # ── Sheet 2: Fitted Time Series Data (Blocked) ─────────────────────
+        result_dfs["Fitted_Data_Points"] = _build_blocked_export_df(results, "stress_relaxation")
 
     elif eff_tt == "frequency_sweep":
         results = analyze_frequency_sweep(dataframes_list)
@@ -631,7 +683,8 @@ async def download_results(
             with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for name, df in result_dfs.items():
                     csv_io = io.StringIO()
-                    df.to_csv(csv_io, index=False)
+                    header = False if name == "Fitted_Data_Points" else True
+                    df.to_csv(csv_io, index=False, header=header)
                     zf.writestr(f"{name}.csv", csv_io.getvalue())
             zip_buf.seek(0)
             return StreamingResponse(
@@ -643,7 +696,8 @@ async def download_results(
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
             for sheet, df in result_dfs.items():
-                df.to_excel(writer, sheet_name=sheet, index=False)
+                header = False if sheet == "Fitted_Data_Points" else True
+                df.to_excel(writer, sheet_name=sheet, index=False, header=header)
         buf.seek(0)
         return StreamingResponse(
             iter([buf.read()]),
@@ -705,7 +759,8 @@ async def raw_plot(
             if x_col not in seg.columns:
                 continue
             x = pd.to_numeric(seg[x_col], errors='coerce')
-            seg_label = name if len(intervals) == 1 else f"{name} seg{seg_i + 1}"
+            short_name = _short_sample_name(name)
+            seg_label = short_name if len(intervals) == 1 else f"{short_name} seg{seg_i + 1}"
 
             for y_col in y_cols_list:
                 if y_col not in seg.columns:
