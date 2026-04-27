@@ -541,6 +541,17 @@ def build_creep_figures(
 # Recovery component analysis
 # ---------------------------------------------------------------------------
 
+def _short_sample_name(full_name: str) -> str:
+    """Extract only the test portion of a Project:::Test (Result) string."""
+    if ":::" in str(full_name):
+        # "(Project):::Short Name (Test Type)"
+        short = str(full_name).split(":::")[-1]
+        if "(" in short:
+            short = short.split("(")[0].strip()
+        return short
+    return str(full_name)
+
+
 def evaluate_recovery_components(analysis_results: list[dict], t_release: float = None) -> list[dict]:
     """Decompose creep into elastic, viscoelastic and plastic fractions."""
     components = []
@@ -613,35 +624,48 @@ def build_recovery_component_figures(components: list[dict]) -> dict:
         return empty.to_dict()
 
     df = pd.DataFrame(components)
+    # Use short names for plotting
+    df['ShortName'] = df['Sample'].apply(_short_sample_name)
+    
     means = df[['frac_elastic','frac_visco','frac_plastic']].mean()
     stds  = df[['frac_elastic','frac_visco','frac_plastic']].std(ddof=0).fillna(0)
 
-    avg_row = pd.DataFrame([{'Sample': 'Mean', **means}])
+    avg_row = pd.DataFrame([{'Sample': 'Mean', 'ShortName': 'Mean', **means}])
     df_plot = pd.concat([df, avg_row], ignore_index=True)
 
     n_rows = len(components)
-    tbl_height = max(0.28, min(0.40, 0.12 + n_rows * 0.06))
+    # Increase table height allowance to avoid clipping
+    tbl_height = max(0.35, min(0.50, 0.15 + (n_rows+2) * 0.05))
     bar_height = 1.0 - tbl_height
 
     fig = make_subplots(
         rows=2, cols=1,
         specs=[[{"type": "bar"}], [{"type": "table"}]],
         row_heights=[bar_height, tbl_height],
-        vertical_spacing=0.14,
+        vertical_spacing=0.12,
     )
 
-    fig.add_trace(go.Bar(x=df_plot['Sample'], y=df_plot['frac_elastic'],
+    fig.add_trace(go.Bar(x=df_plot['ShortName'], y=df_plot['frac_elastic'],
                          name='Elastic', marker_color='#2196F3',
                          text=[f"{v:.1f}%" for v in df_plot['frac_elastic']],
                          textposition='inside', insidetextanchor='middle'), row=1, col=1)
-    fig.add_trace(go.Bar(x=df_plot['Sample'], y=df_plot['frac_visco'],
+    fig.add_trace(go.Bar(x=df_plot['ShortName'], y=df_plot['frac_visco'],
                          name='Viscoelastic', marker_color='#FF9800',
                          text=[f"{v:.1f}%" for v in df_plot['frac_visco']],
                          textposition='inside', insidetextanchor='middle'), row=1, col=1)
-    fig.add_trace(go.Bar(x=df_plot['Sample'], y=df_plot['frac_plastic'],
+    fig.add_trace(go.Bar(x=df_plot['ShortName'], y=df_plot['frac_plastic'],
                          name='Plastic', marker_color='#4CAF50',
                          text=[f"{v:.1f}%" for v in df_plot['frac_plastic']],
                          textposition='inside', insidetextanchor='middle'), row=1, col=1)
+    
+    # Add labels on TOP of bars
+    fig.add_trace(go.Scatter(
+        x=df_plot['ShortName'], y=[102]*len(df_plot),
+        text=df_plot['ShortName'], mode='text',
+        textposition='top center', showlegend=False,
+        textfont=dict(size=11, color='#333'),
+        cliponaxis=False
+    ), row=1, col=1)
 
     headers = ['Sample', 'Elastic (%)', 'Viscoelastic (%)', 'Plastic (%)']
     cols_d  = ['Sample', 'frac_elastic', 'frac_visco', 'frac_plastic']
@@ -656,22 +680,23 @@ def build_recovery_component_figures(components: list[dict]) -> dict:
 
     fig.add_trace(go.Table(
         header=dict(values=[f'<b>{h}</b>' for h in headers],
-                    fill_color='paleturquoise', align='left', font=dict(size=13)),
-        cells=dict(values=table_vals, fill_color='lavender',  align='left', font=dict(size=12)),
+                    fill_color='paleturquoise', align='left', font=dict(size=12)),
+        cells=dict(values=table_vals, fill_color='lavender',  align='left', font=dict(size=11),
+                   # Increase row height to prevent clipping
+                   height=28),
     ), row=2, col=1)
 
     fig.update_layout(
         barmode='stack',
         title_text='<b>Recovery Component Analysis</b>',
         title_x=0.5,
-        xaxis=dict(title='Sample', type='category'),
-        yaxis=dict(title='Fraction (%)', range=[0, 108], autorange=False),
-        plot_bgcolor='white',
+        yaxis=dict(title='Fraction (%)', range=[0, 115]), # Extra room for top labels
+        xaxis=dict(showticklabels=False, title='Sample'), # Hide bottom labels as they are on top now
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-        height=560 + n_rows * 20,
-        margin=dict(l=60, r=20, t=60, b=40),
+        margin=dict(l=50, r=20, t=80, b=30),
+        height=650 + n_rows*35, # Increase total height
+        plot_bgcolor='white'
     )
-
     return fig.to_dict()
 
 

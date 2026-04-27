@@ -139,7 +139,12 @@ body {
   border-radius: 0.5rem;
   border: 1px solid #dee2e6;
   padding: 0.5rem;
-  min-height: 560px;
+  margin-bottom: 1rem;
+  /* Allow plot to determine its own height (Plotly sets it inline) */
+  min-height: 480px; 
+  height: auto;
+  overflow: visible;
+  display: block;
 }
 
 /* ===== Description accordion ===== */
@@ -199,14 +204,39 @@ body {
   padding: 0.35rem 0.5rem;
 }
 
-.preview-table td {
-  white-space: nowrap;
-  padding: 0.25rem 0.5rem;
+#plot-section {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 1rem;
 }
 
-/* ===== Responsive plot height ===== */
-@media (max-width: 768px) {
-  .plot-container { min-height: 380px; }
+#plot-tab-content {
+  margin-bottom: 2rem;
+  flex-grow: 1;
+  display: block !important;
+  height: auto !important;
+  min-height: 100px;
+}
+
+/* Ensure tab panes are relative and preserve their content height */
+.tab-pane {
+  position: relative !important;
+  height: auto !important;
+  overflow: visible !important;
+}
+
+.plot-wrapper {
+  display: block;
+  width: 100%;
+  clear: both;
+  overflow: visible;
+}
+
+/* ===== Analysis description accordion ===== */
+#desc-accordion {
+  clear: both;
+  margin-top: 1.5rem;
+  width: 100%;
 }
 
 /* ===== noUiSlider custom theme ===== */

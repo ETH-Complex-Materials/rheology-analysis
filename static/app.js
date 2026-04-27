@@ -13,14 +13,15 @@ const DESCRIPTIONS = {
       $$\\varepsilon(t) = \\frac{\\sigma_0 t_\\text{rel}}{\\eta_1} + \\frac{\\sigma_0}{G_2}\\!\\left(1-e^{-t_\\text{rel}/\\tau_2}\\right)e^{-(t-t_\\text{rel})/\\tau_2}$$
       <p>where $\\tau_2 = \\eta_2/G_2$ is the retardation time. The transition window around $t_\\text{release}$ is pruned automatically to remove instrument oscillation artefacts. Use <em>Exclude time ranges</em> in the Parameters panel to remove additional non-equilibrium data (e.g. the initial loading ramp).</p>`,
 
-    'Recovery Components': `
+    'Regression Parameters': `<p>Fitted parameters from the Burgers (and optional Maxwell / Kelvin–Voigt) model. $R^2$ is evaluated on the data used for fitting (after pruning and exclusions).</p>`,
+    
+    'Recovery Components (Burgers)': `
       <p>Total deformation at $t = t_\\text{release}$ is partitioned into three fractions:</p>
       $$f_\\text{elastic} = \\frac{\\sigma_0/G_1}{\\varepsilon_\\text{total}}, \\quad
         f_\\text{viscoelastic} = \\frac{(\\sigma_0/G_2)(1-e^{-t_\\text{rel}/\\tau_2})}{\\varepsilon_\\text{total}}, \\quad
         f_\\text{plastic} = \\frac{\\sigma_0 t_\\text{rel}/\\eta_1}{\\varepsilon_\\text{total}}$$
       <p>The <strong>elastic</strong> ($f_\\text{el}$) and <strong>viscoelastic</strong> ($f_\\text{ve}$) components are recovered after stress release; the <strong>plastic</strong> component ($f_\\text{pl}$) is permanent deformation. A purely elastic material gives $f_\\text{el}=1$; an ideal viscous fluid gives $f_\\text{pl}=1$.</p>`,
 
-    'Regression Parameters': `<p>Fitted parameters from the Burgers (and optional Maxwell / Kelvin–Voigt) model. $R^2$ is evaluated on the data used for fitting (after pruning and exclusions).</p>`,
     'Component Table':       `<p>Mean and standard deviation of elastic, viscoelastic, and plastic fractions across all selected replicates.</p>`,
   },
 
@@ -105,6 +106,13 @@ function scheduleRerun() {
   _rerunTimer = setTimeout(() => runAnalysis(), 700);
 }
 
+// Debounce timer for fast raw-data preview update
+let _previewTimer = null;
+function schedulePreviewUpdate() {
+  clearTimeout(_previewTimer);
+  _previewTimer = setTimeout(() => autoRunCreepPreview(), 400);
+}
+
 // ===== Axis scale state =====
 const axisScale = { x: 'linear', y: 'linear' };
 
@@ -159,8 +167,8 @@ dropZone.addEventListener('drop', e => {
 fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); });
 
 async function handleFile(f) {
-  if (!f.name.toLowerCase().endsWith('.xlsx')) {
-    showError('Only .xlsx files are supported.');
+  if (!f.name.toLowerCase().match(/\.(xlsx|csv)$/)) {
+    showError('Only .xlsx and .csv files are supported.');
     return;
   }
   state.file = f;
@@ -214,7 +222,13 @@ async function handleFile(f) {
 
 // ===== Sheet name parsing =====
 function parseSheetName(name) {
-  // Match: <material>_<replicate> where replicate = s1, s2, rep1, r1, etc.
+  // If the backend provided Project:::Test
+  const parts = name.split(':::');
+  if (parts.length >= 2) {
+    return { material: parts[0], replicate: parts[1] };
+  }
+
+  // Fallback heuristic: <material>_<replicate> where replicate = s1, s2, rep1, r1, etc.
   const m = name.match(/^(.+?)_((?:s|rep?)\d+)$/i);
   if (m) return { material: m[1], replicate: m[2] };
   return { material: name, replicate: null };
@@ -283,19 +297,19 @@ function renderSheetList() {
                 <input type="checkbox" class="form-check-input sheet-cb" value="${escHtml(name)}"
                        ${sheetChecked ? 'checked' : ''}>
                 <span class="flex-grow-1 small text-truncate" title="${escHtml(name)}">${escHtml(sheetLabel)}</span>
-                <small class="text-muted" style="font-size:0.68rem;">${hasSegs ? intervals.length+'seg' : info.n_rows+'pts'}</small>
-                ${hasSegs ? `<button class="btn-expand" title="Segments"><i class="bi bi-chevron-right"></i></button>` : ''}
+                <small class="text-muted" style="font-size:0.68rem;">${hasSegs ? intervals.length+' segments' : info.n_rows+' pts'}</small>
+                ${hasSegs ? `<button class="btn-expand" title="Toggle intervals"><i class="bi bi-chevron-${hasSegs ? 'down' : 'right'}"></i></button>` : ''}
               </div>
-              ${hasSegs ? `<div class="interval-list d-none">
+              ${hasSegs ? `<div class="interval-list ${hasSegs ? '' : 'd-none'}">
                 ${intervals.map(iv => {
                   const tLabel = iv.t_start != null ? `${iv.t_start}–${iv.t_end}s` : '';
                   const chk = state.intervalSelections[name].has(iv.index) ? 'checked' : '';
-                  const phLabel = segPhaseLabel(info.test_type || testTypeSelect.value, iv.index);
+                  const phLabel = segPhaseLabel(info.test_type || testTypeSelect.value, iv.index, intervals.length);
                   return `<label class="interval-item">
                     <input type="checkbox" class="form-check-input iv-cb"
                            data-sheet="${escHtml(name)}" data-idx="${iv.index}" ${chk}>
                     <span>${escHtml(phLabel)}</span>
-                    <span class="text-muted" style="font-size:0.68rem;">${tLabel}</span>
+                    <span class="text-muted ms-auto" style="font-size:0.68rem; min-width:65px; text-align:right;">${tLabel}</span>
                   </label>`;
                 }).join('')}
               </div>` : ''}
@@ -347,6 +361,7 @@ function renderSheetList() {
         }
       });
       _initSegmentSliders(); initCustomPlot(); renderInferredParams(); _updatePruneLabels();
+      schedulePreviewUpdate();
       if (state.hasRun) scheduleRerun();
     });
 
@@ -367,6 +382,7 @@ function renderSheetList() {
         }
         _updateMatCb(matCb, sheetNames);
         _initSegmentSliders(); initCustomPlot(); renderInferredParams(); _updatePruneLabels();
+        schedulePreviewUpdate();
         if (state.hasRun) scheduleRerun();
       });
     });
@@ -387,6 +403,7 @@ function renderSheetList() {
         if (sheetCb) _updateSheetCb(sheetCb, name);
         _updateMatCb(matCb, sheetNames);
         _initSegmentSliders(); renderInferredParams(); _updatePruneLabels();
+        schedulePreviewUpdate();
         if (state.hasRun) scheduleRerun();
       });
     });
@@ -405,10 +422,17 @@ function renderSheetList() {
 }
 
 // Label a segment as Creep / Recovery / Seg N
-function segPhaseLabel(testType, segIndex) {
+function segPhaseLabel(testType, segIndex, totalSegs = 0) {
   if (testType === 'creep_recovery') {
-    if (segIndex === 0) return 'Creep phase';
-    if (segIndex === 1) return 'Recovery phase';
+    if (totalSegs === 2) {
+      if (segIndex === 0) return 'Creep phase';
+      if (segIndex === 1) return 'Recovery phase';
+    } else if (totalSegs > 2) {
+      // Often Interval 1 is pre-conditioning, 2 is creep, 3 is recovery
+      if (segIndex === 0) return 'Pre-conditioning';
+      if (segIndex === 1) return 'Creep phase';
+      if (segIndex === 2) return 'Recovery phase';
+    }
   }
   return `Segment ${segIndex + 1}`;
 }
@@ -1227,6 +1251,16 @@ function addCustomPlotTab(fig, label) {
 
 // ===== Description panel =====
 function updateDescription(testType, figLabel) {
+  const activePane = document.querySelector('#plot-tab-content .tab-pane.show.active');
+  const activeId = activePane ? activePane.id : '';
+  
+  // Hide box for raw data tabs, manual analysis, or the Burgers component tab
+  if (activeId === 'tab-pane-creep-ts' || activeId === 'tab-pane-creep-tbl' || 
+      activeId === 'by-hand-tab-pane' || activeId === 'tab-pane-fit-2') {
+    descAccordion.classList.add('d-none');
+    return;
+  }
+
   // Resolve type key — handle "auto" mode labels like "Creep Recovery — G' and G''"
   let typeKey  = testType;
   let labelKey = figLabel;
@@ -1478,7 +1512,7 @@ function updateRelaxationPreviewZones() {
  * active    — whether the first appended tab is active.
  * tblFirst  — if true, appends Data Table then Time Series; otherwise the reverse.
  */
-function _appendCreepPreviewTabs(active = false, tblFirst = false) {
+function _appendCreepPreviewTabs(activeId = null, tblFirst = false) {
   if (!state.creepPreviewFig) return;
 
   const sheetNames   = Object.keys(state.sheets);
@@ -1496,9 +1530,9 @@ function _appendCreepPreviewTabs(active = false, tblFirst = false) {
     plotTabs.appendChild(tsLi);
 
     const tsPane = document.createElement('div');
-    tsPane.className = `tab-pane fade${tsActive ? ' show active' : ''}`;
+    tsPane.className = `tab-pane${tsActive ? ' active' : ''}`;
     tsPane.id        = tsId;
-    tsPane.innerHTML = `<div class="plot-container" id="plot-div-creep-ts"></div>`;
+    tsPane.innerHTML = `<div class="plot-wrapper"><div class="plot-container" id="plot-div-creep-ts"></div></div>`;
     plotTabContent.appendChild(tsPane);
 
     const _renderTsPlot = () => {
@@ -1534,17 +1568,19 @@ function _appendCreepPreviewTabs(active = false, tblFirst = false) {
     plotTabs.appendChild(tblLi);
 
     const tblPane = document.createElement('div');
-    tblPane.className = `tab-pane fade${tblActive ? ' show active' : ''}`;
+    tblPane.className = `tab-pane${tblActive ? ' active' : ''}`;
     tblPane.id        = tblId;
     tblPane.innerHTML = `
-      <div class="d-flex align-items-center gap-2 mb-2 mt-2">
-        <label class="small text-muted mb-0">Sheet:</label>
-        <select class="form-select form-select-sm" id="creep-tbl-sheet-sel"
-                style="width:auto;min-width:130px;">
-          ${sheetNames.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
-        </select>
-      </div>
-      <div id="creep-tbl-content"></div>`;
+      <div class="plot-wrapper">
+        <div class="d-flex align-items-center gap-2 mb-2 mt-2">
+          <label class="small text-muted mb-0">Sheet:</label>
+          <select class="form-select form-select-sm" id="creep-tbl-sheet-sel"
+                  style="width:auto;min-width:130px;">
+            ${sheetNames.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
+          </select>
+        </div>
+        <div id="creep-tbl-content"></div>
+      </div>`;
     plotTabContent.appendChild(tblPane);
 
     const _renderTbl = () => {
@@ -1561,12 +1597,25 @@ function _appendCreepPreviewTabs(active = false, tblFirst = false) {
     });
   };
 
-  if (tblFirst) {
-    _addTbl(active);   // Data Table first (active)
-    _addTs(false);     // Time Series second
+  const tsId  = 'tab-pane-creep-ts';
+  const tblId = 'tab-pane-creep-tbl';
+
+  let tsActive, tblActive;
+  if (typeof activeId === 'string') {
+    tsActive  = (activeId === '#' + tsId);
+    tblActive = (activeId === '#' + tblId);
   } else {
-    _addTs(active);    // Time Series first (active) — pre-analysis preview
-    _addTbl(false);
+    // If activeId was passed as a boolean (legacy)
+    tblActive = !!activeId && tblFirst;
+    tsActive  = !!activeId && !tblFirst;
+  }
+
+  if (tblFirst) {
+    _addTbl(tblActive);
+    _addTs(tsActive);
+  } else {
+    _addTs(tsActive);
+    _addTbl(tblActive);
   }
 }
 
@@ -1726,10 +1775,19 @@ async function autoRunCreepPreview() {
 
     state.creepPreviewFig = rawData.figure;   // persist for later re-use
 
-    plotTabs.innerHTML       = '';
-    plotTabContent.innerHTML = '';
-    _appendCreepPreviewTabs(true, true);      // Data Table first, then Time Series
-    showPlotSection(true);
+    const tsPlotDiv = document.getElementById('plot-div-creep-ts');
+    if (tsPlotDiv) {
+      // If the plot div already exists (on the page), just update it
+      const fig = JSON.parse(JSON.stringify(state.creepPreviewFig));
+      Plotly.react(tsPlotDiv, fig.data || [], fig.layout || {});
+      setTimeout(() => updateCreepPreviewZones(), 50);
+    } else if (!state.hasRun) {
+      // If no analysis run yet, show the preview as the main view
+      plotTabs.innerHTML       = '';
+      plotTabContent.innerHTML = '';
+      _appendCreepPreviewTabs('#tab-pane-creep-ts', false);   // Time Series active by default
+      showPlotSection(true);
+    }
 
   } catch (e) {
     console.warn('Creep preview failed:', e);
@@ -1839,15 +1897,19 @@ function renderPlots(data) {
     plotTabs.appendChild(li);
 
     const pane = document.createElement('div');
-    pane.className = `tab-pane fade ${active ? 'show active' : ''}`;
+    pane.className = `tab-pane ${active ? 'active' : ''}`;
     pane.id        = id;
-    pane.innerHTML = `<div class="plot-container" id="plot-div-fit-${i}"></div>`;
+    // Wrap the plot-container in a wrapper to ensure layout clearance
+    pane.innerHTML = `
+      <div class="plot-wrapper">
+        <div class="plot-container" id="plot-div-fit-${i}"></div>
+      </div>`;
     plotTabContent.appendChild(pane);
   });
 
   // Recovery Components (by hand) — always last for creep_recovery
   if (isCreep && data.creep_samples?.length) {
-    _appendByHandTab(data.creep_samples);
+    _appendByHandTab(data.creep_samples, shouldBeActive('by-hand-tab-pane', false));
   }
 
   showPlotSection(true);
@@ -1922,20 +1984,20 @@ function _appendGenericDataTable(active = false) {
  * threshold inputs (ε₁ = elastic/VE boundary, ε₂ = permanent deformation).
  * All computation is client-side: no extra network call is needed.
  */
-function _appendByHandTab(creepSamples) {
+function _appendByHandTab(creepSamples, active = false) {
   // --- Tab button ---
   const li = document.createElement('li');
   li.className = 'nav-item';
   li.innerHTML =
-    `<button class="nav-link" id="by-hand-tab-btn" data-bs-toggle="tab"
+    `<button class="nav-link ${active ? 'active' : ''}" id="by-hand-tab-btn" data-bs-toggle="tab"
              data-bs-target="#by-hand-tab-pane" type="button" role="tab">
-       Recovery Components (by hand)
+       Recovery Components (visually)
      </button>`;
   plotTabs.appendChild(li);
 
   // --- Tab pane ---
   const pane = document.createElement('div');
-  pane.className = 'tab-pane fade';
+  pane.className = `tab-pane ${active ? 'active' : ''}`;
   pane.id = 'by-hand-tab-pane';
   pane.setAttribute('role', 'tabpanel');
 
@@ -1956,6 +2018,7 @@ function _appendByHandTab(creepSamples) {
   const tabBtn = li.querySelector('button');
   tabBtn.addEventListener('shown.bs.tab', () => {
     creepSamples.forEach((cs, idx) => _initByHandPlot(cs, idx));
+    updateDescription(null, null); // Hide desc for this tab
   });
 }
 
@@ -2007,7 +2070,7 @@ function _buildByHandCard(cs, idx) {
           <thead class="table-light">
             <tr>
               <th>Component</th>
-              <th>By hand</th>
+              <th>Visual</th>
               ${burgersCols}
             </tr>
           </thead>
