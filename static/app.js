@@ -1867,6 +1867,8 @@ function renderPlots(data) {
   // Otherwise (first run, or was on a preview tab) → activate preview tabs as before.
   const restoreFit = prevFitIndex >= 0;
 
+  const shouldBeActive = (id, fallback) => restoreFit ? false : fallback;
+
   // For creep_recovery: Data Table then Time Series go FIRST
   if (isCreep && state.creepPreviewFig) {
     _appendCreepPreviewTabs(!restoreFit, true);
