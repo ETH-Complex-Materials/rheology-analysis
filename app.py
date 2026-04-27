@@ -21,7 +21,7 @@ from analysis.creep import (analyze_creep_recovery, build_creep_figures,
                              build_recovery_component_figures, evaluate_recovery_components,
                              infer_sigma0, infer_t_release)
 from analysis.frequency import analyze_frequency_sweep, build_frequency_figures
-from analysis.relaxation import analyze_stress_relaxation, build_relaxation_figures
+from analysis.relaxation import analyze_stress_relaxation, build_relaxation_figures, infer_eps0
 from analysis.temperature import analyze_temperature_sweep, build_temperature_figures
 
 app = FastAPI(title="Rheology Analysis API")
@@ -168,6 +168,7 @@ def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tu
         t_release  = None if t_release_raw == "auto" else float(t_release_raw)
         en_maxwell = bool(p.get("enable_maxwell", False))
         en_kelvin  = bool(p.get("enable_kelvin", False))
+        en_zener   = bool(p.get("enable_zener",  False))
         prune_win  = float(p.get("prune_window", 0.0))
 
         results = analyze_creep_recovery(
@@ -175,13 +176,15 @@ def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tu
             drop_index=p.get("drop_index", []),
             enable_maxwell=en_maxwell,
             enable_kelvin=en_kelvin,
+            enable_zener=en_zener,
             prune_window=prune_win,
             exclude_ranges=p.get("exclude_ranges", []),
             prune_start_n=int(p.get("prune_start_n", 0)),
             prune_release_n=int(p.get("prune_release_n", 0)),
         )
         overlay = bool(p.get("overlay", False))
-        multi, table = build_creep_figures(results, units, en_maxwell, en_kelvin, overlay=overlay)
+        multi, table = build_creep_figures(results, units, en_maxwell, en_kelvin,
+                                           enable_zener=en_zener, overlay=overlay)
         components = evaluate_recovery_components(results)
         comp_fig = build_recovery_component_figures(components)
 
@@ -254,15 +257,20 @@ def _dispatch(test_type: str, dataframes_list: list, p: dict, units: dict) -> tu
     elif test_type == "stress_relaxation":
         en_maxwell = bool(p.get("enable_maxwell", False))
         en_kelvin  = bool(p.get("enable_kelvin", False))
+        en_zener   = bool(p.get("enable_zener",  False))
+        eps0_ov    = p.get("eps0_override")
         results = analyze_stress_relaxation(
             dataframes_list,
             drop_index=p.get("drop_index", []),
             enable_maxwell=en_maxwell,
             enable_kelvin=en_kelvin,
+            enable_zener=en_zener,
             exclude_ranges=p.get("exclude_ranges", []),
+            eps0_override=float(eps0_ov) if eps0_ov is not None else None,
         )
         overlay = bool(p.get("overlay", False))
-        multi, table = build_relaxation_figures(results, units, en_maxwell, en_kelvin, overlay=overlay)
+        multi, table = build_relaxation_figures(results, units, en_maxwell, en_kelvin,
+                                                enable_zener=en_zener, overlay=overlay)
         return [multi, table], ["Stress Relaxation Fits", "Regression Parameters"], {}
 
     elif test_type == "frequency_sweep":
@@ -408,6 +416,9 @@ async def parse_file(file: UploadFile = File(...)):
                 "sigma0":    s0,
                 "t_release": t_r,
             }
+        elif tt == "stress_relaxation":
+            eps0_val = infer_eps0(full_data)
+            inferred = {"eps0": eps0_val}
 
         result[name] = {
             "columns":     list(df.columns),
@@ -536,6 +547,7 @@ async def download_results(
             drop_index=p.get("drop_index", []),
             enable_maxwell=bool(p.get("enable_maxwell", False)),
             enable_kelvin=bool(p.get("enable_kelvin", False)),
+            enable_zener=bool(p.get("enable_zener", False)),
             prune_start_n=int(p.get("prune_start_n", 0)),
             prune_release_n=int(p.get("prune_release_n", 0)),
         )
@@ -565,6 +577,13 @@ async def download_results(
                 row["G_KV (Pa)"]   = round(float(kp.get("G (Pa)",   float("nan"))), 4)
                 row["η_KV (Pa·s)"] = round(float(kp.get("η (Pa·s)", float("nan"))), 4)
                 row["R² (KV)"]     = round(float(kp.get("R2 Score", float("nan"))), 4)
+            zp = res.get("params_zener", {})
+            if zp and "Error" not in zp:
+                row["G_perm_Zener (Pa)"]    = round(float(zp.get("G_perm (Pa)",    float("nan"))), 4)
+                row["G_trans_Zener (Pa)"]   = round(float(zp.get("G_trans (Pa)",   float("nan"))), 4)
+                row["η_trans_Zener (Pa·s)"] = round(float(zp.get("η_trans (Pa·s)", float("nan"))), 4)
+                row["τ_ret_Zener (s)"]      = round(float(zp.get("τ_ret (s)",      float("nan"))), 4)
+                row["R² (Zener)"]           = round(float(zp.get("R2 Score",       float("nan"))), 4)
             rows.append(row)
         result_dfs["Fitted_Parameters"] = pd.DataFrame(rows)
 
@@ -631,16 +650,20 @@ async def download_results(
         result_dfs["LVER"] = pd.DataFrame(lver)
 
     elif eff_tt == "stress_relaxation":
+        eps0_ov = p.get("eps0_override")
         results = analyze_stress_relaxation(
             dataframes_list,
             drop_index=p.get("drop_index", []),
             enable_maxwell=bool(p.get("enable_maxwell", False)),
             enable_kelvin=bool(p.get("enable_kelvin", False)),
+            enable_zener=bool(p.get("enable_zener", False)),
+            exclude_ranges=p.get("exclude_ranges", []),
+            eps0_override=float(eps0_ov) if eps0_ov is not None else None,
         )
         rows = []
         for res in results:
             row = {"Sample": res["Sample"]}
-            for model in ["burgers", "maxwell", "kelvin"]:
+            for model in ["burgers", "maxwell", "kelvin", "zener"]:
                 pk = f"params_{model}"
                 if pk in res and "Error" not in res[pk]:
                     for k, v in res[pk].items():

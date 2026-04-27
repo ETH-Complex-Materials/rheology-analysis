@@ -96,6 +96,7 @@ const state = {
   lastResponse: null,
   hasRun: false,           // true after first successful analysis run
   creepPreviewFig: null,   // saved rawplot figure for creep_recovery (persists across Run Analysis)
+  relaxationPreviewFig: null, // saved rawplot figure for stress_relaxation
 };
 
 // Debounce timer for auto re-run after slider change
@@ -206,8 +207,11 @@ async function handleFile(f) {
 
     hideLoading();
     if (testTypeSelect.value === 'creep_recovery') {
-      showPreviewState();          // show data table immediately
-      autoRunCreepPreview();       // async: switches to plot section when ready
+      showPreviewState();
+      autoRunCreepPreview();
+    } else if (testTypeSelect.value === 'stress_relaxation') {
+      showPreviewState();
+      autoRunRelaxationPreview();
     } else {
       showPreviewState();
     }
@@ -614,6 +618,13 @@ function renderParams() {
           </label>
         </div>
         <div class="form-check form-check-sm mt-1">
+          <input class="form-check-input" type="checkbox" id="p-zener">
+          <label class="form-check-label" for="p-zener">Include Zener model (SLS)
+            <i class="bi bi-info-circle text-muted ms-1" data-bs-toggle="tooltip"
+               title="Standard Linear Solid: permanent spring G_perm ∥ Maxwell branch (G_trans + η_trans). Predicts complete recovery (no permanent deformation). 3 free parameters."></i>
+          </label>
+        </div>
+        <div class="form-check form-check-sm mt-1">
           <input class="form-check-input" type="checkbox" id="p-overlay">
           <label class="form-check-label" for="p-overlay">Overlay all samples in one plot
             <i class="bi bi-info-circle text-muted ms-1" data-bs-toggle="tooltip"
@@ -643,18 +654,39 @@ function renderParams() {
   } else if (tt === 'stress_relaxation') {
     paramsBody.innerHTML = `
       <div class="param-group mb-2">
+        <label class="d-block mb-1">Applied strain ε₀
+          <i class="bi bi-info-circle text-muted ms-1" data-bs-toggle="tooltip"
+             title="Imposed strain (absolute, dimensionless). Inferred from the modal value of the Shear Strain column ÷ 100. Override if the inferred value is incorrect."></i>
+        </label>
+        <div class="input-group input-group-sm">
+          <span class="input-group-text text-muted small" id="p-eps0-inferred"
+                style="min-width:130px;font-variant-numeric:tabular-nums;">inferred: —</span>
+          <input type="number" class="form-control" id="p-eps0"
+                 placeholder="override" min="0" step="0.00001">
+          <span class="input-group-text text-muted" style="font-size:0.75rem;">blank = auto</span>
+        </div>
+      </div>
+
+      <div class="param-group mb-2 border-top pt-2">
         <div class="form-check form-check-sm">
           <input class="form-check-input" type="checkbox" id="p-maxwell">
           <label class="form-check-label" for="p-maxwell">Include Maxwell model
             <i class="bi bi-info-circle text-muted ms-1" data-bs-toggle="tooltip"
-               title="Single-exponential decay: σ(t) = Eε₀ exp(−t/τ). Use as a reference for simple viscoelastic fluids."></i>
+               title="Single-exponential decay: σ(t) = Eε₀ exp(−t/τ). Reference for simple viscoelastic fluids."></i>
           </label>
         </div>
         <div class="form-check form-check-sm mt-1">
           <input class="form-check-input" type="checkbox" id="p-kelvin">
           <label class="form-check-label" for="p-kelvin">Include Kelvin-Voigt model
             <i class="bi bi-info-circle text-muted ms-1" data-bs-toggle="tooltip"
-               title="Constant-stress prediction under strain control; acts as an elastic-only baseline."></i>
+               title="Constant-stress prediction under strain control; elastic-only baseline."></i>
+          </label>
+        </div>
+        <div class="form-check form-check-sm mt-1">
+          <input class="form-check-input" type="checkbox" id="p-zener">
+          <label class="form-check-label" for="p-zener">Include Zener model (SLS)
+            <i class="bi bi-info-circle text-muted ms-1" data-bs-toggle="tooltip"
+               title="Standard Linear Solid: σ(t) = ε₀[G∞ + G_trans·exp(−t/τ)], τ = η_trans/G_trans. Predicts stress relaxation to a finite equilibrium value. 3 free parameters."></i>
           </label>
         </div>
         <div class="form-check form-check-sm mt-1">
@@ -704,7 +736,7 @@ function renderParams() {
       </div>`;
   }
 
-  // Show/hide inferred parameters for creep_recovery
+  // Show/hide inferred parameters card + inline eps0 label
   renderInferredParams();
 
   // Init point-based prune sliders (creep_recovery only)
@@ -729,6 +761,75 @@ function renderParams() {
 
 const PRUNE_WIN_S = 5; // seconds: slider covers only the first/last N seconds of each segment
 
+/** Return the first ≤100 numeric Time values from the first selected sheet (stress_relaxation). */
+function _getRelaxationTimePts() {
+  const firstName = [...state.selectedSheets][0];
+  const info = firstName ? state.sheets[firstName] : null;
+  if (!info?.sample_data) return [];
+  return info.sample_data
+    .slice(0, 100)
+    .map(r => r['Time'])
+    .filter(v => v != null && isFinite(parseFloat(v)))
+    .map(Number);
+}
+
+/** Build/rebuild the start-prune slider for stress_relaxation inside container. */
+function _initRelaxationStartPruneSlider(container) {
+  if (!container) return;
+  container.querySelectorAll('[data-nouislider]').forEach(el => {
+    if (el.noUiSlider) el.noUiSlider.destroy();
+  });
+  container.innerHTML = '';
+
+  const timePts = _getRelaxationTimePts();
+  if (timePts.length < 2) return;
+  const nPts = timePts.length;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'seg-slider-wrap mb-3';
+  wrap.innerHTML = `
+    <div class="seg-slider-label mb-1">
+      <i class="bi bi-scissors me-1"></i>Start prune
+      <small class="text-muted fw-normal ms-1">initial non-equilibrium ramp</small>
+    </div>
+    <div class="d-flex justify-content-between" style="font-size:0.68rem;color:#6c757d;">
+      <span>▶ Exclude initial points</span>
+      <span id="relax-prune-s-disp" class="seg-slider-val">none</span>
+    </div>
+    <div id="relax-prune-s" data-nouislider class="mt-1 mx-1"></div>
+    <small class="text-muted d-block mt-1">
+      Slider positions correspond to the first ${nPts} time points in the file.
+    </small>`;
+  container.appendChild(wrap);
+
+  const sliderEl = wrap.querySelector('#relax-prune-s');
+  noUiSlider.create(sliderEl, {
+    start: 0,
+    range: { min: 0, max: Math.max(1, nPts - 1) },
+    step: 1,
+    tooltips: {
+      to: v => {
+        const idx = Math.round(v);
+        return idx === 0 ? 'none' : `t ≤ ${timePts[Math.min(idx, timePts.length - 1)].toFixed(2)} s`;
+      },
+      from: Number,
+    },
+  });
+
+  sliderEl.noUiSlider.on('update', values => {
+    const idx = Math.round(parseFloat(values[0]));
+    const disp = document.getElementById('relax-prune-s-disp');
+    if (disp) {
+      disp.textContent = idx === 0
+        ? 'none'
+        : `${idx} pt${idx !== 1 ? 's' : ''} (t ≤ ${timePts[Math.min(idx, timePts.length - 1)].toFixed(2)} s)`;
+    }
+    updateRelaxationPreviewZones();
+    updateFitPlotExclusionZones();
+    if (state.hasRun) scheduleRerun();
+  });
+}
+
 function _initSegmentSliders() {
   const container = document.getElementById('segment-sliders-container');
   if (!container) return;
@@ -738,6 +839,12 @@ function _initSegmentSliders() {
     if (el.noUiSlider) el.noUiSlider.destroy();
   });
   container.innerHTML = '';
+
+  // stress_relaxation: custom start-prune on actual time values (no end prune)
+  if (testTypeSelect.value === 'stress_relaxation') {
+    _initRelaxationStartPruneSlider(container);
+    return;
+  }
 
   const segs = getSelectedSegments();
   for (const seg of segs) {
@@ -855,8 +962,23 @@ function _attachSliderListeners() {
 
 // Build exclude_ranges from per-segment and transition-zone sliders
 function collectFitWindow() {
-  const segs = getSelectedSegments();
   const ranges = [];
+
+  // stress_relaxation: only a start-prune slider based on actual time values
+  if (testTypeSelect.value === 'stress_relaxation') {
+    const sliderEl = document.getElementById('relax-prune-s');
+    if (sliderEl?.noUiSlider) {
+      const idx = Math.round(parseFloat(sliderEl.noUiSlider.get()));
+      if (idx > 0) {
+        const timePts = _getRelaxationTimePts();
+        const t_cut = timePts[Math.min(idx, timePts.length - 1)];
+        if (t_cut != null) ranges.push([timePts[0] ?? 0, t_cut]);
+      }
+    }
+    return ranges;
+  }
+
+  const segs = getSelectedSegments();
 
   // Per-segment start/end prune
   for (const seg of segs) {
@@ -911,6 +1033,7 @@ function collectParams() {
     p.prune_release_n = parseInt(val('p-prune-release-n') || 0);
     p.enable_maxwell  = chk('p-maxwell');
     p.enable_kelvin   = chk('p-kelvin');
+    p.enable_zener    = chk('p-zener');
     p.overlay         = chk('p-overlay');
     p.combine_segments = true;
   } else if (tt === 'amplitude_sweep') {
@@ -919,9 +1042,12 @@ function collectParams() {
   } else if (tt === 'stress_relaxation') {
     p.enable_maxwell    = chk('p-maxwell');
     p.enable_kelvin     = chk('p-kelvin');
+    p.enable_zener      = chk('p-zener');
     p.overlay           = chk('p-overlay');
-    p.combine_segments  = true;  // always combine segments
+    p.combine_segments  = true;
     p.exclude_ranges    = collectFitWindow();
+    const eps0Raw = val('p-eps0');
+    p.eps0_override = (eps0Raw && eps0Raw.trim() !== '') ? parseFloat(eps0Raw) : null;
   } else if (tt === 'frequency_sweep') {
     p.show_tan_delta = chk('p-tan-delta');
     p.show_eta_star  = chk('p-eta-star');
@@ -1154,10 +1280,18 @@ function updateDescription(testType, figLabel) {
   if (window.MathJax) MathJax.typesetPromise([descContent]).catch(console.error);
 }
 
-// ===== Inferred parameters display (creep_recovery) =====
-// Reads from state.sheets (populated at parse time) — shown before the user runs analysis.
+// ===== Inferred parameters display =====
+// For creep_recovery: shows sigma0 / t_release in a card.
+// For stress_relaxation: updates the inline eps0 label in the params panel.
 function renderInferredParams() {
   const tt = testTypeSelect.value;
+
+  if (tt === 'stress_relaxation') {
+    inferredParamsCard.classList.add('d-none');
+    _updateEps0InferredLabel();
+    return;
+  }
+
   if (tt !== 'creep_recovery') {
     inferredParamsCard.classList.add('d-none');
     return;
@@ -1204,6 +1338,18 @@ function renderInferredParams() {
     </p>`;
 
   inferredParamsCard.classList.remove('d-none');
+}
+
+/** Update the inline "inferred: X.XXXX" label next to the eps0 input (stress_relaxation). */
+function _updateEps0InferredLabel() {
+  const el = document.getElementById('p-eps0-inferred');
+  if (!el) return;
+  let eps0 = null;
+  for (const name of state.selectedSheets) {
+    const info = state.sheets[name];
+    if (info?.inferred?.eps0 != null) { eps0 = info.inferred.eps0; break; }
+  }
+  el.textContent = eps0 != null ? `inferred: ${Number(eps0).toPrecision(4)}` : 'inferred: —';
 }
 
 // ===== Point-based prune sliders (creep_recovery) =====
@@ -1321,6 +1467,36 @@ function updateCreepPreviewZones() {
     });
   }
 
+  Plotly.relayout(el, { shapes });
+}
+
+// ===== Relaxation preview plot: interactive exclusion zone =====
+
+function updateRelaxationPreviewZones() {
+  const el = document.getElementById('plot-div-relax-ts');
+  if (!el?._fullLayout) return;
+  const sliderEl = document.getElementById('relax-prune-s');
+  if (!sliderEl?.noUiSlider) { Plotly.relayout(el, { shapes: [] }); return; }
+
+  const idx = Math.round(parseFloat(sliderEl.noUiSlider.get()));
+  const shapes = [];
+
+  if (idx > 0) {
+    const timePts = _getRelaxationTimePts();
+    const t0 = timePts[0] ?? 0;
+    const t1 = timePts[Math.min(idx, timePts.length - 1)];
+    if (t1 != null && t1 > t0) {
+      shapes.push({
+        type: 'rect', xref: 'x', yref: 'paper',
+        x0: t0, x1: t1, y0: 0, y1: 1,
+        fillcolor: 'rgba(220,53,69,0.18)',
+        line: { color: 'rgba(220,53,69,0.5)', width: 1 },
+        layer: 'below',
+        label: { text: 'Excluded', textposition: 'top left',
+                 font: { color: 'rgba(220,53,69,0.9)', size: 11 } },
+      });
+    }
+  }
   Plotly.relayout(el, { shapes });
 }
 
@@ -1443,6 +1619,138 @@ function _appendCreepPreviewTabs(activeId = null, tblFirst = false) {
   }
 }
 
+/**
+ * Append relaxation preview tabs (Data Table + Relaxation Plot).
+ * active=true  → Data Table is the active tab (tblFirst=true) or Relaxation Plot (tblFirst=false).
+ */
+function _appendRelaxationPreviewTabs(active = false, tblFirst = false) {
+  if (!state.relaxationPreviewFig) return;
+
+  const sheetNames   = Object.keys(state.sheets);
+  const defaultSheet = sheetNames[0] || '';
+
+  // ── Relaxation Plot tab ──
+  const _addTs = (tsActive) => {
+    const tsId = 'tab-pane-relax-ts';
+    const tsLi = document.createElement('li');
+    tsLi.className = 'nav-item';
+    tsLi.innerHTML = `<button class="nav-link${tsActive ? ' active' : ''}" data-bs-toggle="tab"
+      data-bs-target="#${tsId}" type="button">
+      <i class="bi bi-graph-up me-1"></i>Relaxation Plot
+    </button>`;
+    plotTabs.appendChild(tsLi);
+
+    const tsPane = document.createElement('div');
+    tsPane.className = `tab-pane fade${tsActive ? ' show active' : ''}`;
+    tsPane.id        = tsId;
+    tsPane.innerHTML = `<div class="plot-container" id="plot-div-relax-ts"></div>`;
+    plotTabContent.appendChild(tsPane);
+
+    const _renderTsPlot = () => {
+      const el = document.getElementById('plot-div-relax-ts');
+      if (!el || el.dataset.rendered) return;
+      el.dataset.rendered = '1';
+      const fig = JSON.parse(JSON.stringify(state.relaxationPreviewFig));
+      Plotly.newPlot(el, fig.data || [], fig.layout || {}, {
+        responsive: true, displayModeBar: true,
+      });
+      setTimeout(() => updateRelaxationPreviewZones(), 80);
+    };
+
+    if (tsActive) setTimeout(_renderTsPlot, 50);
+
+    tsLi.querySelector('button').addEventListener('shown.bs.tab', () => {
+      _renderTsPlot();
+      const el = document.getElementById('plot-div-relax-ts');
+      if (el) Plotly.Plots.resize(el);
+      updateRelaxationPreviewZones();
+    });
+  };
+
+  // ── Data Table tab ──
+  const _addTbl = (tblActive) => {
+    const tblId = 'tab-pane-relax-tbl';
+    const tblLi = document.createElement('li');
+    tblLi.className = 'nav-item';
+    tblLi.innerHTML = `<button class="nav-link${tblActive ? ' active' : ''}" data-bs-toggle="tab"
+      data-bs-target="#${tblId}" type="button">
+      <i class="bi bi-table me-1"></i>Data Table
+    </button>`;
+    plotTabs.appendChild(tblLi);
+
+    const tblPane = document.createElement('div');
+    tblPane.className = `tab-pane fade${tblActive ? ' show active' : ''}`;
+    tblPane.id        = tblId;
+    tblPane.innerHTML = `
+      <div class="d-flex align-items-center gap-2 mb-2 mt-2">
+        <label class="small text-muted mb-0">Sheet:</label>
+        <select class="form-select form-select-sm" id="relax-tbl-sheet-sel"
+                style="width:auto;min-width:130px;">
+          ${sheetNames.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
+        </select>
+      </div>
+      <div id="relax-tbl-content"></div>`;
+    plotTabContent.appendChild(tblPane);
+
+    const _renderTbl = () => {
+      const sel = document.getElementById('relax-tbl-sheet-sel');
+      document.getElementById('relax-tbl-content').innerHTML =
+        _buildPreviewHTML(sel?.value || defaultSheet);
+    };
+
+    if (tblActive) setTimeout(_renderTbl, 50);
+
+    tblLi.querySelector('button').addEventListener('shown.bs.tab', _renderTbl);
+    tblPane.addEventListener('change', e => {
+      if (e.target.id === 'relax-tbl-sheet-sel') _renderTbl();
+    });
+  };
+
+  if (tblFirst) {
+    _addTbl(active);
+    _addTs(false);
+  } else {
+    _addTs(active);
+    _addTbl(false);
+  }
+}
+
+async function autoRunRelaxationPreview() {
+  if (!state.file || state.selectedSheets.size === 0) return;
+  if (testTypeSelect.value !== 'stress_relaxation') return;
+
+  const hasStress = [...state.selectedSheets].some(name =>
+    state.sheets[name]?.columns?.includes('Shear Stress')
+  );
+  if (!hasStress) return;
+
+  const fd = new FormData();
+  fd.append('file',                state.file);
+  fd.append('sheet_names',         JSON.stringify([...state.selectedSheets]));
+  fd.append('interval_selections', JSON.stringify(collectIntervalSelections()));
+  fd.append('x_col',  'Time');
+  fd.append('y_cols', JSON.stringify(['Shear Stress']));
+  fd.append('mode',   'lines+markers');
+
+  try {
+    const res = await fetch('/api/rawplot', { method: 'POST', body: fd });
+    if (!res.ok) return;
+    const rawData = await res.json();
+
+    state.relaxationPreviewFig = rawData.figure;
+
+    plotTabs.innerHTML       = '';
+    plotTabContent.innerHTML = '';
+    _appendRelaxationPreviewTabs(true, true);   // Data Table active first, then Relaxation Plot
+    showPlotSection(true);
+
+    // Re-init the start-prune slider now that state.sheets is populated
+    _initRelaxationStartPruneSlider(document.getElementById('segment-sliders-container'));
+  } catch (e) {
+    console.warn('Relaxation preview failed:', e);
+  }
+}
+
 async function autoRunCreepPreview() {
   if (!state.file || state.selectedSheets.size === 0) return;
   if (testTypeSelect.value !== 'creep_recovery') return;
@@ -1524,9 +1832,10 @@ async function runAnalysis() {
 
 // ===== Render plots =====
 function renderPlots(data) {
-  // Capture the currently active tab ID before clearing
-  const activeBtn = plotTabs.querySelector('.nav-link.active');
-  const prevActiveId = activeBtn ? activeBtn.getAttribute('data-bs-target') : null;
+  // Remember which fit-tab was active before clearing (used to restore on rerun).
+  // Only fit tabs carry data-fig-index; preview tabs do not.
+  const activeFitBtn = plotTabs.querySelector('.nav-link.active[data-fig-index]');
+  const prevFitIndex = activeFitBtn ? parseInt(activeFitBtn.dataset.figIndex) : -1;
 
   plotTabs.innerHTML       = '';
   plotTabContent.innerHTML = '';
@@ -1536,9 +1845,12 @@ function renderPlots(data) {
   const labels  = data.figure_labels || figs.map((_, i) => `Plot ${i+1}`);
   const figData = figs.map(f => JSON.parse(JSON.stringify(f)));
   const isCreep = data.test_type === 'creep_recovery';
+  const isRelax = data.test_type === 'stress_relaxation';
+  const isLogLog = data.test_type === 'amplitude_sweep' || data.test_type === 'frequency_sweep';
 
-  setAxisScaleState('x', 'linear');
-  setAxisScaleState('y', 'linear');
+  // Default axis scale per test type
+  setAxisScaleState('x', isLogLog ? 'log' : 'linear');
+  setAxisScaleState('y', isLogLog ? 'log' : 'linear');
 
   const plotOpts = { responsive: true, displayModeBar: true, modeBarButtonsToRemove: ['toImage'] };
 
@@ -1551,24 +1863,31 @@ function renderPlots(data) {
     if (i === 0) setTimeout(() => updateFitPlotExclusionZones(), 80);
   };
 
-  // Helper to decide if a tab should be active
-  const shouldBeActive = (id, isFirstPossible) => {
-    if (prevActiveId) return prevActiveId === (id.startsWith('#') ? id : '#' + id);
-    return isFirstPossible;
-  };
+  // prevFitIndex >= 0 means the user was already looking at a fit tab → restore it.
+  // Otherwise (first run, or was on a preview tab) → activate preview tabs as before.
+  const restoreFit = prevFitIndex >= 0;
 
-  // For creep_recovery: Preview tabs (Time Series and Data Table)
+  // For creep_recovery: Data Table then Time Series go FIRST
   if (isCreep && state.creepPreviewFig) {
-    // If no previous active tab, default to Time Series (#tab-pane-creep-ts)
-    const activeId = prevActiveId || '#tab-pane-creep-ts';
-    _appendCreepPreviewTabs(activeId, false); // tblFirst=false means Time Series is first
+    _appendCreepPreviewTabs(!restoreFit, true);
   }
 
-  // Main analysis tabs
+  // For stress_relaxation: Data Table then Relaxation Plot go FIRST
+  if (isRelax && state.relaxationPreviewFig) {
+    _appendRelaxationPreviewTabs(!restoreFit, true);
+  }
+
+  // For all other types (amplitude, frequency, temperature…): add a Data Table tab first
+  if (!isCreep && !isRelax) {
+    _appendGenericDataTable(!restoreFit);
+  }
+
+  // Main analysis tabs — active only when restoring a fit tab or non-preview types
   figs.forEach((fig, i) => {
     const id     = `tab-pane-fit-${i}`;
-    // For non-creep, default first analysis tab to active
-    const active = shouldBeActive(id, !isCreep && i === 0);
+    // Analysis tabs are active on first run only when there is no preview tab
+    // (creep and relax have their own preview; other types now have a generic data table first).
+    const active = restoreFit ? (i === prevFitIndex) : false;
 
     const li = document.createElement('li');
     li.className = 'nav-item';
@@ -1596,13 +1915,9 @@ function renderPlots(data) {
   showPlotSection(true);
   updateDescription(data.test_type, labels[0]);
 
-  // Render the currently active fit plot if it exists
-  const activeFitBtn = plotTabs.querySelector('.nav-link.active[data-fig-index]');
-  if (activeFitBtn) {
-    renderFig(parseInt(activeFitBtn.dataset.figIndex));
-  } else if (!isCreep) {
-    // Default fallback for first non-creep run
-    setTimeout(() => renderFig(0), 30);
+  // Trigger immediate render for the active fit tab (only when restoring)
+  if (restoreFit) {
+    setTimeout(() => renderFig(prevFitIndex), 30);
   }
 
   plotTabs.querySelectorAll('[data-fig-index]').forEach(btn => {
@@ -1615,6 +1930,51 @@ function renderPlots(data) {
     });
   });
 }
+
+// ===== Generic Data Table tab (amplitude, frequency, temperature sweeps) =====
+
+function _appendGenericDataTable(active = false) {
+  const sheetNames   = Object.keys(state.sheets);
+  const defaultSheet = sheetNames[0] || '';
+  if (!sheetNames.length) return;
+
+  const tblId = 'tab-pane-generic-tbl';
+  const li    = document.createElement('li');
+  li.className = 'nav-item';
+  li.innerHTML = `<button class="nav-link${active ? ' active' : ''}" data-bs-toggle="tab"
+    data-bs-target="#${tblId}" type="button">
+    <i class="bi bi-table me-1"></i>Data Table
+  </button>`;
+  plotTabs.appendChild(li);
+
+  const pane = document.createElement('div');
+  pane.className = `tab-pane fade${active ? ' show active' : ''}`;
+  pane.id        = tblId;
+  pane.innerHTML = `
+    <div class="d-flex align-items-center gap-2 mb-2 mt-2">
+      <label class="small text-muted mb-0">Sheet:</label>
+      <select class="form-select form-select-sm" id="generic-tbl-sheet-sel"
+              style="width:auto;min-width:130px;">
+        ${sheetNames.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
+      </select>
+    </div>
+    <div id="generic-tbl-content"></div>`;
+  plotTabContent.appendChild(pane);
+
+  const _render = () => {
+    const sel = document.getElementById('generic-tbl-sheet-sel');
+    document.getElementById('generic-tbl-content').innerHTML =
+      _buildPreviewHTML(sel?.value || defaultSheet);
+  };
+
+  if (active) setTimeout(_render, 50);
+
+  li.querySelector('button').addEventListener('shown.bs.tab', _render);
+  pane.addEventListener('change', e => {
+    if (e.target.id === 'generic-tbl-sheet-sel') _render();
+  });
+}
+
 
 // ===== Recovery Components — by hand =====
 
